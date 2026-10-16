@@ -742,6 +742,10 @@ int main(int argc, char* argv[])
     /* Load config file */
     PcConfig_Load("config.cfg");
     PcAudioConfig_Load("config.cfg");
+    {
+        extern int g_PsxAudioDisabled;
+        g_PsxAudioDisabled = g_PcAudioConfig.disabled;
+    }
 
     /* After the config load, or the parsed skip_intros would clobber it.
      * map0_s00 is the compiled-in default, so a config still naming it counts as

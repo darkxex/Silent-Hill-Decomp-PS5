@@ -30,6 +30,8 @@ typedef struct
      * setting so audio_spatial = 0 can still force the plain stereo sink. */
     int spatial;
     int spatialUserSet;
+    /* audio_disabled = 1: never start audio output (diagnostics). */
+    int disabled;
 } PcAudioConfig;
 
 extern PcAudioConfig g_PcAudioConfig;

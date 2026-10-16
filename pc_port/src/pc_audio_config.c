@@ -101,6 +101,8 @@ void PcAudioConfig_Load(const char* path)
             g_PcAudioConfig.spatial        = atoi(value) != 0;
             g_PcAudioConfig.spatialUserSet = 1;
         }
+        else if (strcmp(key, "audio_disabled") == 0)
+            g_PcAudioConfig.disabled = atoi(value) != 0;
         else if (strcmp(key, "audio_bit_perfect") == 0)
             g_PcAudioConfig.bitPerfect = atoi(value) != 0;
     }

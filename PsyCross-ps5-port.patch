@@ -13,7 +13,7 @@ index d778e60..2365652 100644
   * Safe to change at runtime (launcher config + F2 in-game cycle). */
  extern int							g_cfg_postProcess;
 diff --git a/include/PsyX/PsyX_render.h b/include/PsyX/PsyX_render.h
-index 05929f3..5aa2545 100644
+index 05929f3..aeb7fe1 100644
 --- a/include/PsyX/PsyX_render.h
 +++ b/include/PsyX/PsyX_render.h
 @@ -19,7 +19,7 @@
@@ -47,8 +47,16 @@ index 05929f3..5aa2545 100644
  } TexFormat;
  
  
+@@ -265,6 +269,7 @@ extern TextureID	g_whiteTexture;
+ extern TextureID	g_vramTexture;
+ 
+ extern void			GR_SwapWindow();
++extern void			GR_ClearDepthStencil(void);
+ 
+ // PSX VRAM operations
+ extern void			GR_SaveVRAM(const char* outputFileName, int x, int y, int width, int height, int bReadFromFrameBuffer);
 diff --git a/src/PsyX_main.cpp b/src/PsyX_main.cpp
-index 031c91d..265651a 100644
+index 031c91d..31baf63 100644
 --- a/src/PsyX_main.cpp
 +++ b/src/PsyX_main.cpp
 @@ -54,6 +54,7 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH);
@@ -59,8 +67,106 @@ index 031c91d..265651a 100644
  
  /* Keep the pointer inside the window while the game holds focus, the way
   * borderless games normally behave. Without this a multi-monitor borderless
+@@ -944,6 +945,15 @@ void PsyX_Sys_DoPollEvent()
+ 
+ char begin_scene_flag = 0;
+ 
++extern "C" { double g_PsyxBeginMs[4] = {0, 0, 0, 0}; }
++
++static double BeginNowMs(void)
++{
++	struct timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
++}
++
+ char PsyX_BeginScene()
+ {
+ 	PsyX_Sys_DoPollEvent();
+@@ -980,7 +990,10 @@ char PsyX_BeginScene()
+ 		GR_UpdateSwapIntervalState(swapInterval);
+ 	}
+ 
++	const double bT0 = BeginNowMs();
+ 	GR_BeginScene();
++	const double bT1 = BeginNowMs();
++	g_PsyxBeginMs[0] += bT1 - bT0;
+ 
+ 	// Always clear the backbuffer at the start of every frame. The PSX
+ 	// behavior gates this on activeDrawEnv.isbg, but during state
+@@ -996,6 +1009,8 @@ char PsyX_BeginScene()
+ 		const u_char b = activeDrawEnv.isbg ? activeDrawEnv.b0 : 0;
+ 		GR_Clear(clipenv.x, clipenv.y, clipenv.w, clipenv.h, r, g, b);
+ 	}
++	const double bT2 = BeginNowMs();
++	g_PsyxBeginMs[1] += bT2 - bT1;
+ 
+ 	/* PC port: while the game is frozen (pause / console / map message),
+ 	 * re-present the last captured gameplay frame so this frame's UI prims
+@@ -1005,8 +1020,12 @@ char PsyX_BeginScene()
+ 		extern int g_PsxPresentLastFrame;
+ 		extern void GR_PresentLastFrame(void);
+ 		if (g_PsxPresentLastFrame)
++		{
+ 			GR_PresentLastFrame();
++			g_PsyxBeginMs[3] += 1.0;
++		}
+ 	}
++	g_PsyxBeginMs[2] += BeginNowMs() - bT2;
+ 
+ 	begin_scene_flag = 1;
+ 
+diff --git a/src/audio/PsyX_SPUSoftware.cpp b/src/audio/PsyX_SPUSoftware.cpp
+index d0b1364..0cc035e 100644
+--- a/src/audio/PsyX_SPUSoftware.cpp
++++ b/src/audio/PsyX_SPUSoftware.cpp
+@@ -95,9 +95,14 @@ void SpatialXaPump(void*, int frames)
+     SDL_UnlockMutex(g_spuMutex);
+ }
+ 
++extern "C" { double g_PsyxAudioMs[4] = {0, 0, 0, 0}; }
++extern "C" { int g_PsxAudioDisabled = 0; }
++
+ uint32_t RenderAudio(void*, int16_t* output, uint32_t frames)
+ {
++    const Uint64 tLock = SDL_GetPerformanceCounter();
+     SDL_LockMutex(g_spuMutex);
++    const Uint64 tHeld = SDL_GetPerformanceCounter();
+ 
+     static std::vector<int16_t> xa;
+     xa.resize(static_cast<size_t>(frames) * 2u);
+@@ -108,6 +113,16 @@ uint32_t RenderAudio(void*, int16_t* output, uint32_t frames)
+ 
+     g_spu().RenderFrames(output, static_cast<int>(frames));
+     SDL_UnlockMutex(g_spuMutex);
++    {
++        const double toMs = 1000.0 / (double)SDL_GetPerformanceFrequency();
++        const double held = (double)(SDL_GetPerformanceCounter() - tHeld) * toMs;
++
++        g_PsyxAudioMs[0] += held;
++        g_PsyxAudioMs[1] += (double)(tHeld - tLock) * toMs;
++        g_PsyxAudioMs[2] += 1.0;
++        if (held > g_PsyxAudioMs[3])
++            g_PsyxAudioMs[3] = held;
++    }
+     return frames;
+ }
+ 
+@@ -244,6 +259,12 @@ int PsyX_SPUAL_InitSound()
+     if (!g_xa || !g_referenceXa)
+         return 0;
+ 
++    if (g_PsxAudioDisabled)
++    {
++        eprintinfo("Software SPU output disabled by audio_disabled\n");
++        return 0;
++    }
++
+     SDL_LockMutex(g_spuMutex);
+     g_spu().Reset();
+     g_spu().SetTransferMode(PsyX::TransferMode::DmaWrite);
 diff --git a/src/gpu/PsyX_GPU.cpp b/src/gpu/PsyX_GPU.cpp
-index 0b71c97..1ec83da 100644
+index 0b71c97..2e902bc 100644
 --- a/src/gpu/PsyX_GPU.cpp
 +++ b/src/gpu/PsyX_GPU.cpp
 @@ -965,7 +965,15 @@ static SZEntry g_szTable[SZ_TABLE_SIZE];
@@ -99,12 +205,11 @@ index 0b71c97..1ec83da 100644
  	g_splitIndex = 0;
  	g_splits[0].kind = GPU_SPLIT_LEGACY;
  	g_splits[0].texFormat = (TexFormat)0xFFFF;
-@@ -3038,6 +3054,23 @@ static int PgxpEmitPoly(GrVertex* v, int count)
+@@ -3038,6 +3054,22 @@ static int PgxpEmitPoly(GrVertex* v, int count)
  
  //------------------------------------------------------------------------------------------------------------------------
  
-+extern "C" { unsigned g_PsyxSplitWhy[12] = {0}; }
-+extern "C" { int g_PsxUberSplits = 1; unsigned g_PsyxBlendPair[8][8] = {{0}}; }
++extern "C" { int g_PsxUberSplits = 1; }
 +/* Vertices carry the sampling format in a_position.z (page | fmt << 5) so
 + * 4/8/16-bit and untextured prims can share one split and one program. The
 + * state of a prim is only known when its AddSplit call runs, but its vertices
@@ -123,7 +228,7 @@ index 0b71c97..1ec83da 100644
  static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_DISABLED)
  {
  	int tpage = activeDrawEnv.tpage;
-@@ -3056,11 +3089,44 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
+@@ -3056,6 +3088,25 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
  		textureId = overrideTexture;
  	}
  
@@ -149,26 +254,7 @@ index 0b71c97..1ec83da 100644
  	/* Gated exactly like the colour handle above, NOT read straight off the
  	 * global: an ungated read would key untextured/white splits on override
  	 * state they never sample, fragmenting them once normal maps exist. */
- 	TextureID normalTextureId = (textured && overrideTexture != 0) ? overrideNormalTexture : 0;
- 
-+	if (curSplit.kind != GPU_SPLIT_LEGACY) g_PsyxSplitWhy[0]++;
-+	else {
-+		if (curSplit.blendMode != blendMode) { g_PsyxSplitWhy[1]++; if ((unsigned)curSplit.blendMode < 8 && (unsigned)blendMode < 8) g_PsyxBlendPair[curSplit.blendMode][blendMode]++; }
-+		if (curSplit.texFormat != texFormat) g_PsyxSplitWhy[2]++;
-+		if (curSplit.textureId != textureId) g_PsyxSplitWhy[3]++;
-+		if (curSplit.depthMode != depthMode) g_PsyxSplitWhy[4]++;
-+		if (curSplit.drawPrimMode != g_DrawPrimMode) g_PsyxSplitWhy[5]++;
-+		if (curSplit.drawenv.clip.x != activeDrawEnv.clip.x || curSplit.drawenv.clip.y != activeDrawEnv.clip.y ||
-+		    curSplit.drawenv.clip.w != activeDrawEnv.clip.w || curSplit.drawenv.clip.h != activeDrawEnv.clip.h) g_PsyxSplitWhy[6]++;
-+		if (curSplit.drawenv.dfe != activeDrawEnv.dfe) g_PsyxSplitWhy[7]++;
-+		if (curSplit.isGlyph != (textured ? s_curPrimIsGlyph : 0)) g_PsyxSplitWhy[8]++;
-+		if (curSplit.drawenv.tw.x != overrideTextureOffsetX || curSplit.drawenv.tw.y != overrideTextureOffsetY) g_PsyxSplitWhy[9]++;
-+		if (curSplit.normalTextureId != normalTextureId) g_PsyxSplitWhy[10]++;
-+	}
- 	// FIXME: compare drawing environment too?
- 	if (curSplit.kind == GPU_SPLIT_LEGACY &&
- 		curSplit.blendMode == blendMode &&
-@@ -3189,6 +3255,7 @@ int g_PsxWorldDepthAlways = 1;
+@@ -3189,6 +3240,7 @@ int g_PsxWorldDepthAlways = 1;
  
  int g_PsxDbgAddMode = 1;
  
@@ -176,7 +262,7 @@ index 0b71c97..1ec83da 100644
  void DrawSplit(const GPUDrawSplit& split)
  {
  	const bool isAdditive = (split.blendMode == BM_ADD || split.blendMode == BM_ADD_QUATER_SOURCE);
-@@ -3258,7 +3325,12 @@ void DrawSplit(const GPUDrawSplit& split)
+@@ -3258,7 +3310,12 @@ void DrawSplit(const GPUDrawSplit& split)
  		                        (int)split.numVerts, (int)split.drawenv.dfe);
  	}
  
@@ -190,7 +276,7 @@ index 0b71c97..1ec83da 100644
  
  	if (split.debugText)
  		GR_PopDebugLabel();
-@@ -3327,7 +3399,17 @@ static void DrawShadowCasters(const GPUDrawSplit& split, bool& passBegun)
+@@ -3327,7 +3384,17 @@ static void DrawShadowCasters(const GPUDrawSplit& split, bool& passBegun)
  //
  static void DrawFarMeshSplit(const GPUDrawSplit& split);
  
@@ -208,7 +294,7 @@ index 0b71c97..1ec83da 100644
  {
  #ifdef _DEBUG
  	if (g_dbg_emulatorPaused)
-@@ -3356,7 +3438,11 @@ void DrawAllSplits()
+@@ -3356,7 +3423,11 @@ void DrawAllSplits()
  #endif // _DEBUG
  
  	// next code ideally should be called before EndScene
@@ -280,10 +366,27 @@ index e2b2068..412c31c 100644
  /* This TU is compiled with -fvisibility=hidden on ELF so its libc-colliding
   * names (open/read/write/close/lseek/ioctl/rename) don't interpose libc for
 diff --git a/src/render/PsyX_render.cpp b/src/render/PsyX_render.cpp
-index d67eade..bf699e4 100644
+index d67eade..32656db 100644
 --- a/src/render/PsyX_render.cpp
 +++ b/src/render/PsyX_render.cpp
-@@ -321,6 +321,7 @@ extern "C" void PsyX_GetDrawEnvOffset(float* x, float* y);
+@@ -257,7 +257,15 @@ RECT16 g_PreviousOffscreen = { 0,0,0,0 };
+ 
+ ShaderID g_PreviousShader = -1;
+ 
+-TextureID g_vramTexturesDouble[2];
++/* The PS5 GL driver runs draws a frame or more after they are issued, so overwriting the
++ * texture they sample needs either a glFinish (a full CPU stall, ~20 ms in menus where the
++ * VRAM changes every frame) or a texture nobody has sampled for several uploads. */
++#ifdef __PROSPERO__
++#define VRAM_TEX_COUNT 4
++#else
++#define VRAM_TEX_COUNT 2
++#endif
++TextureID g_vramTexturesDouble[VRAM_TEX_COUNT];
+ TextureID g_vramTexture;
+ int g_vramTextureIdx = 0;
+ 
+@@ -321,6 +329,7 @@ extern "C" void PsyX_GetDrawEnvOffset(float* x, float* y);
  
  int g_cfg_pgxpTextureCorrection = 1;
  int g_cfg_pgxpZBuffer = 1;
@@ -291,7 +394,7 @@ index d67eade..bf699e4 100644
  
  /* PC port (Silent Hill): runtime master gate for PGXP. When 0,
   * MakeVertex* writes 0 into a_zw, the shader takes the `a_zw.y > 100.0`
-@@ -1017,9 +1018,186 @@ static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
+@@ -1017,9 +1026,337 @@ static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
   * bilinear takes that crisp intermediate and eases only the leftover fraction,
   * so it fills the window without the mush of a plain linear stretch. Nearest
   * and bilinear stretch straight to the rect. */
@@ -467,6 +570,157 @@ index d67eade..bf699e4 100644
 +#define glBlitFramebuffer(...) Ps5Blit(__VA_ARGS__)
 +#endif
 +
++#if defined(__PROSPERO__) || defined(SH_PS5_PRESENT_DRAW)
++/* glClear of depth+stencil costs ~4 ms of CPU per call on the PS5 GL driver (it takes
++ * the CPU fallback); a full-screen triangle that writes depth 1.0 and stencil 0 goes
++ * through the GPU draw path instead. Two clears per frame (world OT + UI OT). */
++static GLuint s_ps5ClearProg = 0, s_ps5ClearVao = 0;
++static int    s_ps5ClearFailed = 0;
++
++static GLint s_ps5ClearColorLoc = -1;
++
++/* colorMode 0: depth 1.0 + stencil 0 only. colorMode 1: colour + depth 1.0 (glClear COLOR|DEPTH),
++ * leaving stencil alone. Both obey the scissor like glClear does. */
++static int Ps5ClearDraw(int colorMode, float cr, float cg, float cb)
++{
++	GLint prevProg = 0, prevVao = 0, prevFunc = 0, prevRef = 0, prevVMask = 0, prevWMask = 0;
++	GLint prevFail = 0, prevZFail = 0, prevZPass = 0, prevStFunc = 0, prevDepthFunc = 0;
++	GLint prevPoly = 0, prevVp[4];
++	GLboolean prevColor[4], prevDepthMask, depth, stencil, cull, blend, polyOfs;
++	GLdouble prevRange[2];
++
++	if (s_ps5ClearFailed)
++		return 0;
++
++	if (s_ps5ClearProg == 0)
++	{
++		static const char* vsSrc =
++			"#version 330 core\n"
++			"void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
++			"gl_Position = vec4(p * 2.0 - 1.0, 1.0, 1.0); }\n";
++		static const char* fsSrc =
++			"#version 330 core\n"
++			"uniform vec4 uColor; out vec4 color; void main(){ color = uColor; }\n";
++		GLint ok = 0;
++		GLuint vs = glad_glCreateShader(GL_VERTEX_SHADER);
++		GLuint fs = glad_glCreateShader(GL_FRAGMENT_SHADER);
++
++		glad_glShaderSource(vs, 1, &vsSrc, NULL);
++		glad_glCompileShader(vs);
++		glad_glShaderSource(fs, 1, &fsSrc, NULL);
++		glad_glCompileShader(fs);
++		s_ps5ClearProg = glad_glCreateProgram();
++		glad_glAttachShader(s_ps5ClearProg, vs);
++		glad_glAttachShader(s_ps5ClearProg, fs);
++		glad_glLinkProgram(s_ps5ClearProg);
++		glad_glGetProgramiv(s_ps5ClearProg, GL_LINK_STATUS, &ok);
++		glad_glDeleteShader(vs);
++		glad_glDeleteShader(fs);
++		if (!ok)
++		{
++			s_ps5ClearFailed = 1;
++			return 0;
++		}
++		glad_glGenVertexArrays(1, &s_ps5ClearVao);
++		s_ps5ClearColorLoc = glad_glGetUniformLocation(s_ps5ClearProg, "uColor");
++	}
++
++	depth = glad_glIsEnabled(GL_DEPTH_TEST);
++	stencil = glad_glIsEnabled(GL_STENCIL_TEST);
++	cull = glad_glIsEnabled(GL_CULL_FACE);
++	blend = glad_glIsEnabled(GL_BLEND);
++	polyOfs = glad_glIsEnabled(GL_POLYGON_OFFSET_FILL);
++	glad_glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
++	glad_glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
++	glad_glGetBooleanv(GL_COLOR_WRITEMASK, prevColor);
++	glad_glGetBooleanv(GL_DEPTH_WRITEMASK, &prevDepthMask);
++	glad_glGetIntegerv(GL_DEPTH_FUNC, &prevDepthFunc);
++	glad_glGetIntegerv(GL_STENCIL_FUNC, &prevStFunc);
++	glad_glGetIntegerv(GL_STENCIL_REF, &prevRef);
++	glad_glGetIntegerv(GL_STENCIL_VALUE_MASK, &prevVMask);
++	glad_glGetIntegerv(GL_STENCIL_WRITEMASK, &prevWMask);
++	glad_glGetIntegerv(GL_STENCIL_FAIL, &prevFail);
++	glad_glGetIntegerv(GL_STENCIL_PASS_DEPTH_FAIL, &prevZFail);
++	glad_glGetIntegerv(GL_STENCIL_PASS_DEPTH_PASS, &prevZPass);
++	glad_glGetDoublev(GL_DEPTH_RANGE, prevRange);
++	glad_glGetIntegerv(GL_VIEWPORT, prevVp);
++	(void)prevFunc;
++	(void)prevPoly;
++
++	glad_glUseProgram(s_ps5ClearProg);
++	glad_glBindVertexArray(s_ps5ClearVao);
++	/* glClear ignores the viewport; the triangle must cover the whole target. */
++	glad_glViewport(0, 0, 8192, 8192);
++	if (colorMode)
++		glad_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++	else
++		glad_glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
++	glad_glUniform4f(s_ps5ClearColorLoc, cr, cg, cb, 1.0f);
++	glad_glDisable(GL_BLEND);
++	glad_glDisable(GL_CULL_FACE);
++	glad_glDisable(GL_POLYGON_OFFSET_FILL);
++	glad_glEnable(GL_DEPTH_TEST);
++	glad_glDepthFunc(GL_ALWAYS);
++	glad_glDepthMask(GL_TRUE);
++	glad_glDepthRange(0.0, 1.0);
++	if (colorMode)
++	{
++		glad_glDisable(GL_STENCIL_TEST);
++	}
++	else
++	{
++		glad_glEnable(GL_STENCIL_TEST);
++		glad_glStencilFunc(GL_ALWAYS, 0, 0xFF);
++		glad_glStencilOp(GL_REPLACE, GL_REPLACE, GL_REPLACE);
++		glad_glStencilMask(0xFF);
++	}
++	glad_glDrawArrays(GL_TRIANGLES, 0, 3);
++
++	glad_glViewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
++	glad_glDepthRange(prevRange[0], prevRange[1]);
++	glad_glStencilMask((GLuint)prevWMask);
++	glad_glStencilOp((GLenum)prevFail, (GLenum)prevZFail, (GLenum)prevZPass);
++	glad_glStencilFunc((GLenum)prevStFunc, prevRef, (GLuint)prevVMask);
++	if (stencil) glad_glEnable(GL_STENCIL_TEST);
++	else glad_glDisable(GL_STENCIL_TEST);
++	glad_glDepthMask(prevDepthMask);
++	glad_glDepthFunc((GLenum)prevDepthFunc);
++	if (!depth) glad_glDisable(GL_DEPTH_TEST);
++	if (polyOfs) glad_glEnable(GL_POLYGON_OFFSET_FILL);
++	if (cull) glad_glEnable(GL_CULL_FACE);
++	if (blend) glad_glEnable(GL_BLEND);
++	glad_glColorMask(prevColor[0], prevColor[1], prevColor[2], prevColor[3]);
++	glad_glBindVertexArray((GLuint)prevVao);
++	glad_glUseProgram((GLuint)prevProg);
++
++	g_PreviousShader       = (ShaderID)-1;
++	g_PreviousBlendMode    = -999;
++	g_PreviousDepthMode    = -999;
++	g_PreviousScissorState = -999;
++	return 1;
++}
++#endif
++
++static void GR_ClearColorDepthFast(float r, float g, float b)
++{
++#if defined(__PROSPERO__) || defined(SH_PS5_PRESENT_DRAW)
++	if (Ps5ClearDraw(1, r, g, b))
++		return;
++#endif
++	glClearColor(r, g, b, 1.0f);
++	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
++}
++
++void GR_ClearDepthStencil(void)
++{
++#if defined(__PROSPERO__) || defined(SH_PS5_PRESENT_DRAW)
++	if (Ps5ClearDraw(0, 0.0f, 0.0f, 0.0f))
++		return;
++#endif
++	glClearDepth(1.0);
++	glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
++}
++
  static void GR_PresentBlit(GLuint src, int dx, int dy, int dw, int dh)
  {
  	const int mode = g_PcPresentScale;
@@ -478,7 +732,7 @@ index d67eade..bf699e4 100644
  
  	if (s_internalW <= 0 || s_internalH <= 0 || dw <= 0 || dh <= 0)
  		return;
-@@ -1319,7 +1497,11 @@ static void GR_ResolveBackend(void)
+@@ -1319,7 +1656,11 @@ static void GR_ResolveBackend(void)
  #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
  int GR_InitialiseGLContext(char* windowName, int fullscreen)
  {
@@ -490,7 +744,7 @@ index d67eade..bf699e4 100644
  
  #if defined(RENDERER_OGL)
  	/* A window created with SDL_WINDOW_OPENGL gets an SDL-chosen pixel format
-@@ -1341,6 +1523,14 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
+@@ -1341,6 +1682,14 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
  		windowFlags |= SDL_WINDOW_FULLSCREEN;
  #endif
  
@@ -505,7 +759,18 @@ index d67eade..bf699e4 100644
  	if(g_windowWidth <= 0 || g_windowHeight <= 0)
  		windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
  
-@@ -2033,6 +2223,7 @@ GTEShader g_gte_shader_4;
+@@ -1872,8 +2221,8 @@ void GR_Shutdown()
+ 	glDeleteFramebuffers(1, &g_glOffscreenFramebuffer);
+ 	glDeleteFramebuffers(1, &g_glVRAMFramebuffer);
+ 
+-	GR_DestroyTexture(g_vramTexturesDouble[0]);
+-	GR_DestroyTexture(g_vramTexturesDouble[1]);
++	for (int vi = 0; vi < VRAM_TEX_COUNT; vi++)
++		GR_DestroyTexture(g_vramTexturesDouble[vi]);
+ 
+ 	GR_DestroyTexture(g_whiteTexture);
+ 	GR_DestroyTexture(g_rgLutTexture);
+@@ -2033,6 +2382,7 @@ GTEShader g_gte_shader_4;
  GTEShader g_gte_shader_8;
  GTEShader g_gte_shader_16;
  GTEShader g_gte_shader_32_rgba;
@@ -513,7 +778,7 @@ index d67eade..bf699e4 100644
  GTEShader g_modern_shader_4, g_modern_shader_8, g_modern_shader_16, g_modern_shader_32_rgba;
  
  #if USE_OPENGL
-@@ -2244,6 +2435,23 @@ int g_PsxFogToBlack = 0;
+@@ -2244,6 +2594,23 @@ int g_PsxFogToBlack = 0;
  	"		return VRAM(clut_pos);\n"\
  	"	}\n"
  
@@ -537,7 +802,7 @@ index d67eade..bf699e4 100644
  #define GPU_SAMPLE_TEXTURE_16BIT_FUNC\
  	"	vec2 samplePSX(vec2 tc){\n"\
  	"		vec2 uv = (tc + v_page_clut.xy) * c_VRAMTexel;\n"\
-@@ -2454,8 +2662,14 @@ int g_PsxFogToBlack = 0;
+@@ -2454,8 +2821,14 @@ int g_PsxFogToBlack = 0;
  	"		v_texcoord.xy += a_extra.xy * 0.5;\n"\
  	"		v_color = a_color;\n"\
  	"		v_color.xyz *= a_texcoord.z;\n"\
@@ -554,7 +819,7 @@ index d67eade..bf699e4 100644
  	"		v_page_clut.z = fract(a_position.w / 64.0);\n"\
  	"		v_page_clut.w = floor(a_position.w / 64.0) / 512.0;\n"\
  	"		v_page_clut.xy += c_UVFudge;\n"\
-@@ -2678,7 +2892,9 @@ int g_PsxFogToBlack = 0;
+@@ -2678,7 +3051,9 @@ int g_PsxFogToBlack = 0;
  	 * anything still at its real colour is proven to come from outside this tail. */\
  	"		if (u_voidProbe > 0) fragColor = vec4(fogAmt, v_is3d, 200.0 / 255.0, 1.0);\n"
  
@@ -565,7 +830,7 @@ index d67eade..bf699e4 100644
  	GPU_PACK_RG_FUNC\
  	GPU_DECODE_RG_FUNC\
  	GPU_FETCH_VRAM_FUNC\
-@@ -2691,6 +2907,7 @@ int g_PsxFogToBlack = 0;
+@@ -2691,6 +3066,7 @@ int g_PsxFogToBlack = 0;
  	"	uniform float u_ditherForce;\n"\
  	"	uniform float u_pixelScale;\n"\
  	GPU_LIT_UNIFORMS\
@@ -573,7 +838,7 @@ index d67eade..bf699e4 100644
  	"	void main() {\n"\
  	"		g_tapCov = 1.0;\n"\
  	"		g_tapWt = 1.0;\n"\
-@@ -2727,6 +2944,7 @@ int g_PsxFogToBlack = 0;
+@@ -2727,6 +3103,7 @@ int g_PsxFogToBlack = 0;
  	/* Additive blend is dst*alpha + src (GR_SetBlendMode): STP set (0.5 from
  	 * the LUT) adds, STP clear (1.0) draws solid, as the PSX does. */\
  	"		if (u_fogToBlack > 0) fragColor.a = (fragColor.a < 0.75) ? 1.0 : 0.0;\n"\
@@ -581,7 +846,7 @@ index d67eade..bf699e4 100644
  	"	}\n"
  
  const char* gte_shader_4 =
-@@ -2783,6 +3001,29 @@ const char* gte_shader_16 =
+@@ -2783,6 +3160,29 @@ const char* gte_shader_16 =
  	GPU_FRAGMENT_SAMPLE_SHADER(16)
  	"#endif\n";
  
@@ -611,7 +876,7 @@ index d67eade..bf699e4 100644
  const char* gte_shader_32_rgba =
  	"AFFINE_VARYING vec4 v_texcoord;\n"
  	"varying vec4 v_color;\n"
-@@ -2995,6 +3236,15 @@ ShaderID GR_Shader_Compile(const char* source)
+@@ -2995,6 +3395,15 @@ ShaderID GR_Shader_Compile(const char* source)
  		"#define texture2D   texture\n"
  		"out vec4 fragColor;\n";
  
@@ -627,7 +892,7 @@ index d67eade..bf699e4 100644
  	const char* GLSL_HEADER_VERT;
  	const char* GLSL_HEADER_FRAG;
  
-@@ -3007,7 +3257,7 @@ ShaderID GR_Shader_Compile(const char* source)
+@@ -3007,7 +3416,7 @@ ShaderID GR_Shader_Compile(const char* source)
  	else
  	{
  		GLSL_HEADER_VERT = GLSL_HEADER_VERT_GL;
@@ -636,7 +901,7 @@ index d67eade..bf699e4 100644
  	}
  #endif
  
-@@ -3290,6 +3540,15 @@ void GR_InitialisePSXShaders()
+@@ -3290,6 +3699,15 @@ void GR_InitialisePSXShaders()
  	GR_CompilePSXShader(&g_gte_shader_8, gte_shader_8);
  	GR_CompilePSXShader(&g_gte_shader_16, gte_shader_16);
  	GR_CompilePSXShader(&g_gte_shader_32_rgba, gte_shader_32_rgba);
@@ -652,7 +917,23 @@ index d67eade..bf699e4 100644
  	Pc_ModernShader_Initialise(gte_shader_4, gte_shader_8, gte_shader_16, gte_shader_32_rgba);
  	GR_InitialisePSXShader(&g_modern_shader_4, Pc_ModernShader_Get(TF_4_BIT));
  	GR_InitialisePSXShader(&g_modern_shader_8, Pc_ModernShader_Get(TF_8_BIT));
-@@ -3653,6 +3912,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
+@@ -3391,11 +3809,11 @@ int GR_InitialisePSX()
+ 	{
+ 		int i;
+ 
+-		glGenTextures(2, g_vramTexturesDouble);
+-		GR_MarkTextureNearest(g_vramTexturesDouble[0]);
+-		GR_MarkTextureNearest(g_vramTexturesDouble[1]);
++		glGenTextures(VRAM_TEX_COUNT, g_vramTexturesDouble);
++		for(i = 0; i < VRAM_TEX_COUNT; i++)
++			GR_MarkTextureNearest(g_vramTexturesDouble[i]);
+ 
+-		for(i = 0; i < 2; i++)
++		for(i = 0; i < VRAM_TEX_COUNT; i++)
+ 		{
+ 			glBindTexture(GL_TEXTURE_2D, g_vramTexturesDouble[i]);
+ 
+@@ -3653,6 +4071,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
  		u_shadowClipLoc = shader->shadowClipLoc;
  		u_shadowFadeDistLoc = shader->shadowFadeDistLoc;
  		break;
@@ -660,7 +941,7 @@ index d67eade..bf699e4 100644
  	case TF_16_BIT:
  		GR_SetShader(shader->shader);
  		u_bilinearFilterLoc = shader->bilinearFilterLoc;
-@@ -4015,6 +4275,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
+@@ -4015,6 +4434,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
  	if (texFormat == TF_4_BIT) shader = &g_gte_shader_4;
  	else if (texFormat == TF_8_BIT) shader = &g_gte_shader_8;
  	else if (texFormat == TF_16_BIT) shader = &g_gte_shader_16;
@@ -668,7 +949,64 @@ index d67eade..bf699e4 100644
  	else shader = &g_gte_shader_32_rgba;
  	GR_SetTextureShader(texture, texFormat, shader);
  }
-@@ -6183,6 +6444,12 @@ static void GR_EnsureFbPackTarget(int w, int h)
+@@ -4275,20 +4695,17 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
+ 			const int vpX = (g_windowWidth - vpW) / 2;
+ 
+ 			glDisable(GL_SCISSOR_TEST);
+-			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
++			GR_ClearColorDepthFast(0.0f, 0.0f, 0.0f);
+ 
+ 			glEnable(GL_SCISSOR_TEST);
+ 			glScissor(vpX, 0, vpW, g_windowHeight);
+-			glClearColor(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
++			GR_ClearColorDepthFast(r / 255.0f, g / 255.0f, b / 255.0f);
+ 			glDisable(GL_SCISSOR_TEST);
+ 			return;
+ 		}
+ 	}
+ 
+-	glClearColor(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
++	GR_ClearColorDepthFast(r / 255.0f, g / 255.0f, b / 255.0f);
+ #endif
+ }
+ 
+@@ -4390,7 +4807,7 @@ static void GR_UploadVramRect(int x, int y, int w, int h)
+ 		return;
+ 	for (int row = 0; row < h; row++)
+ 		memcpy(&s_packed[row * w], vram + (size_t)(y + row) * VRAM_WIDTH + x, w * sizeof(unsigned short));
+-	for (int t = 0; t < 2; t++)
++	for (int t = 0; t < VRAM_TEX_COUNT; t++)
+ 	{
+ 		glBindTexture(GL_TEXTURE_2D, g_vramTexturesDouble[t]);
+ 		glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, VRAM_FORMAT, GL_UNSIGNED_BYTE, s_packed);
+@@ -5876,6 +6293,23 @@ void GR_PresentLastFrame(void)
+ 	}
+ #endif
+ 
++#if defined(__PROSPERO__) || defined(SH_PS5_PRESENT_DRAW)
++	/* A same-size glBlitFramebuffer is not turned into a draw by Ps5Blit, and on the
++	 * PS5 driver it costs ~20 ms of CPU every frame a menu is open. */
++	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
++	if (Ps5DrawTexture(g_freezeFrameTex, 0, 0, g_windowWidth, g_windowHeight, 0, 0.0f, 0.0f, 1.0f, 1.0f, 0))
++	{
++		g_PreviousShader       = (ShaderID)-1;
++		g_lastBoundTexture     = (TextureID)-1;
++		g_PreviousBlendMode    = -999;
++		g_PreviousDepthMode    = -999;
++		g_PreviousScissorState = -999;
++		glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
++		g_freezePresentedThisFrame = 1;
++		return;
++	}
++#endif
++
+ 	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_freezeFrameFBO);
+ 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
+ 
+@@ -6183,6 +6617,12 @@ static void GR_EnsureFbPackTarget(int w, int h)
   * (GR_UpdateVRAM calls it after a full vram[] re-upload). */
  static void GR_PackFrameToVramRectGain(int x, int y, int w, int h, float gain)
  {
@@ -681,7 +1019,7 @@ index d67eade..bf699e4 100644
  #if USE_OPENGL
  	GLint vp[4];
  
-@@ -6783,7 +7050,7 @@ static void GR_RestoreStoredFramebufferRegion(void)
+@@ -6783,7 +7223,7 @@ static void GR_RestoreStoredFramebufferRegion(void)
  	 * issue #102 crash signature (GR_UpdateVRAM -> call 0x0 on the cafe map
  	 * pickup). Skip the restore rather than fault; the feedback effect just
  	 * degrades. */
@@ -690,19 +1028,87 @@ index d67eade..bf699e4 100644
  		return;
  
  	const int x = g_PreviousFramebuffer.x;
-@@ -6880,6 +7147,11 @@ void GR_UpdateVRAM()
+@@ -6872,17 +7312,36 @@ void GR_ReadVRAM(unsigned short* dst, int x, int y, int dst_w, int dst_h)
+ 	}
+ }
+ 
++extern "C" { double g_PsyxVramMs[6] = {0, 0, 0, 0, 0, 0}; }
++
++static double VramNowMs(void)
++{
++	struct timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
++}
++
+ void GR_UpdateVRAM()
+ {
+ 	if (!vram_need_update)
+ 		return;
++	const double vT0 = VramNowMs();
++	g_PsyxVramMs[5] += 1.0;
+ 
  	vram_need_update = 0;
  
  #if USE_OPENGL
 +#ifdef __PROSPERO__
 +	/* The driver batches draws and runs them later; finish them before the texture
 +	 * they sample is overwritten. */
++#if VRAM_TEX_COUNT == 2
 +	glFinish();
 +#endif
++	const double vT1 = VramNowMs();
++	g_PsyxVramMs[1] += vT1 - vT0;
++#endif
  	g_vramTexture = g_vramTexturesDouble[g_vramTextureIdx];
- 	g_vramTextureIdx++;
- 	g_vramTextureIdx &= 1;
-@@ -7004,6 +7276,10 @@ void GR_DiagGLError(const char* where)
+-	g_vramTextureIdx++;
+-	g_vramTextureIdx &= 1;
++	g_vramTextureIdx = (g_vramTextureIdx + 1) % VRAM_TEX_COUNT;
+ 
+ 	glBindTexture(GL_TEXTURE_2D, g_vramTexture);
+ 
+@@ -6897,15 +7356,28 @@ void GR_UpdateVRAM()
+ #if 0
+ 	glTexImage2D(GL_TEXTURE_2D, 0, VRAM_INTERNAL_FORMAT, VRAM_WIDTH, VRAM_HEIGHT, 0, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
+ #else
+-	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, VRAM_WIDTH, VRAM_HEIGHT, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
++	{
++		const double tA = VramNowMs();
++		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, VRAM_WIDTH, VRAM_HEIGHT, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
++		g_PsyxVramMs[2] += VramNowMs() - tA;
++	}
+ #endif
+ 
+-	GR_RestoreStoredFramebufferRegion();
++	{
++		const double tB = VramNowMs();
++		GR_RestoreStoredFramebufferRegion();
++		g_PsyxVramMs[3] += VramNowMs() - tB;
++	}
+ 
+ 	/* PC port: the full vram[] re-upload just stamped CPU bytes over the
+ 	 * framebuffer-feedback pages — re-pack the last captured frame into them so
+ 	 * TIM streaming mid-scene can't blank the motion-blur / dream source. */
+-	GR_RepackFrameToVramBuffers();
++	{
++		const double tC = VramNowMs();
++		GR_RepackFrameToVramBuffers();
++		g_PsyxVramMs[4] += VramNowMs() - tC;
++	}
++	g_PsyxVramMs[0] += VramNowMs() - vT0;
+ 
+ #endif
+ }
+@@ -6945,7 +7417,7 @@ void GR_DirectUploadVRAMRegion(int x, int y, int w, int h)
+ 		           (size_t)w * sizeof(unsigned short));
+ 	}
+ 
+-	for (int i = 0; i < 2; i++)
++	for (int i = 0; i < VRAM_TEX_COUNT; i++)
+ 	{
+ 		glBindTexture(GL_TEXTURE_2D, g_vramTexturesDouble[i]);
+ 		glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, VRAM_FORMAT, GL_UNSIGNED_BYTE, block);
+@@ -7004,6 +7476,10 @@ void GR_DiagGLError(const char* where)
   * reuse, four presents old, which has long finished -- no stall. */
  static void GreyFrame_Present(int w, int h)
  {
@@ -713,7 +1119,7 @@ index d67eade..bf699e4 100644
  #if USE_OPENGL
  	static GLuint        s_pbo[4];
  	static int           s_pboW[4];
-@@ -7125,8 +7401,127 @@ static void GreyFrame_Present(int w, int h)
+@@ -7125,8 +7601,127 @@ static void GreyFrame_Present(int w, int h)
  	memset(&s_gf, 0, sizeof(s_gf));
  }
  
@@ -841,7 +1247,7 @@ index d67eade..bf699e4 100644
  	{
  		extern int g_PsxFrameVerts, g_PsxLastFrameVerts;
  		g_PsxLastFrameVerts = g_PsxFrameVerts;
-@@ -7198,6 +7593,9 @@ void GR_SwapWindow()
+@@ -7198,6 +7793,9 @@ void GR_SwapWindow()
  		 * presents nothing (a black window) when an FBO is still bound at
  		 * flushBuffer, even though framebuffer 0 holds the finished frame. */
  		glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -851,7 +1257,7 @@ index d67eade..bf699e4 100644
  		SDL_GL_SwapWindow(g_window);
  		if (g_internalFBO)
  			glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
-@@ -7363,6 +7761,18 @@ void GR_SetBlendMode(BlendMode blendMode)
+@@ -7363,6 +7961,18 @@ void GR_SetBlendMode(BlendMode blendMode)
  		return;
  
  #if USE_OPENGL

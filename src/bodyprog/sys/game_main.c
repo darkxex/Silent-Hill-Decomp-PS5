@@ -52,8 +52,10 @@ int g_PcFmvClockDiscard = 0;
  * SDL_GetTicks calls a frame and prints nothing on a healthy run. */
 static unsigned int s_sfTop, s_sfUpdStart, s_sfUpdEnd, s_sfFsqEnd, s_sfSwapEnd;
 static unsigned int s_pfPh[6];
+static double s_ot0Cpu, s_ot0Wall;
 static unsigned int s_dr0, s_dr1, s_dr2, s_dr3, s_drAcc[4], s_drPre;
 #include <stdio.h>
+#include <time.h>
 #include <SDL_scancode.h>
 #include <SDL_mouse.h>
 extern u8 g_WorldEnvWork[];
@@ -3035,26 +3037,36 @@ void MainLoop(void) // 0x80032EE0
                             SH_DBG("[PERF] gpu submit avg ms: drawAllSplits=%.1f updateVB=%.1f glDrawArrays=%.1f splits/frame=%.0f",
                                    g_PsyxPerfMs[0] / s_perfFrames, g_PsyxPerfMs[1] / s_perfFrames,
                                    g_PsyxPerfMs[2] / s_perfFrames, g_PsyxPerfMs[3] / s_perfFrames);
-                            extern unsigned g_PsyxSplitWhy[12];
-                            SH_DBG("[PERF] split breaks/frame: nonLegacy=%.0f blend=%.0f texFmt=%.0f texId=%.0f depthMode=%.0f primMode=%.0f clip=%.0f dfe=%.0f glyph=%.0f twOff=%.0f normal=%.0f",
-                                   (double)g_PsyxSplitWhy[0] / s_perfFrames, (double)g_PsyxSplitWhy[1] / s_perfFrames,
-                                   (double)g_PsyxSplitWhy[2] / s_perfFrames, (double)g_PsyxSplitWhy[3] / s_perfFrames,
-                                   (double)g_PsyxSplitWhy[4] / s_perfFrames, (double)g_PsyxSplitWhy[5] / s_perfFrames,
-                                   (double)g_PsyxSplitWhy[6] / s_perfFrames, (double)g_PsyxSplitWhy[7] / s_perfFrames,
-                                   (double)g_PsyxSplitWhy[8] / s_perfFrames, (double)g_PsyxSplitWhy[9] / s_perfFrames,
-                                   (double)g_PsyxSplitWhy[10] / s_perfFrames);
-                            memset(g_PsyxSplitWhy, 0, sizeof(unsigned) * 12);
+                            SH_DBG("[PERF] ot0 per-frame: threadCpuMs=%.1f wallMs=%.1f",
+                                   s_ot0Cpu / s_perfFrames, s_ot0Wall / s_perfFrames);
+                            s_ot0Cpu = s_ot0Wall = 0;
                             {
-                                extern unsigned g_PsyxBlendPair[8][8];
-                                char pb[320]; int pn = 0, bi, bj;
-                                pb[0] = 0;
-                                for (bi = 0; bi < 8; bi++)
-                                    for (bj = 0; bj < 8; bj++)
-                                        if (g_PsyxBlendPair[bi][bj] && pn < 280)
-                                            pn += snprintf(pb + pn, sizeof(pb) - pn, " %d>%d=%.0f", bi, bj, (double)g_PsyxBlendPair[bi][bj] / s_perfFrames);
-                                SH_DBG("[PERF] blend pairs/frame (0=opaque 1=avg 2=add 3=sub 4=add/4 5=const):%s", pb);
-                                memset(g_PsyxBlendPair, 0, sizeof(g_PsyxBlendPair));
+                                extern int g_PsxLastFrameVerts;
+                                SH_DBG("[PERF] scene: pos=(%ld,%ld) map=%d room=%d vertsLastFrame=%d",
+                                       (long)g_SysWork.playerWork.player.position.vx,
+                                       (long)g_SysWork.playerWork.player.position.vz,
+                                       (int)g_SavegamePtr->mapIdx, (int)g_SavegamePtr->mapRoomIdx,
+                                       g_PsxLastFrameVerts);
                             }
+                            extern double g_PsyxBeginMs[4];
+                            SH_DBG("[PERF] BeginScene per-frame: grBeginMs=%.2f grClearMs=%.2f presentLastFrameMs=%.2f presentFrames=%.2f",
+                                   g_PsyxBeginMs[0] / s_perfFrames, g_PsyxBeginMs[1] / s_perfFrames,
+                                   g_PsyxBeginMs[2] / s_perfFrames, g_PsyxBeginMs[3] / s_perfFrames);
+                            g_PsyxBeginMs[0] = g_PsyxBeginMs[1] = g_PsyxBeginMs[2] = g_PsyxBeginMs[3] = 0;
+                            extern double g_PsyxVramMs[6];
+                            SH_DBG("[PERF] GR_UpdateVRAM per-frame: totalMs=%.2f glFinishMs=%.2f texSubMs=%.2f restoreFbMs=%.2f repackMs=%.2f calls=%.2f",
+                                   g_PsyxVramMs[0] / s_perfFrames, g_PsyxVramMs[1] / s_perfFrames,
+                                   g_PsyxVramMs[2] / s_perfFrames, g_PsyxVramMs[3] / s_perfFrames,
+                                   g_PsyxVramMs[4] / s_perfFrames, g_PsyxVramMs[5] / s_perfFrames);
+                            g_PsyxVramMs[0] = g_PsyxVramMs[1] = g_PsyxVramMs[2] = g_PsyxVramMs[3] = g_PsyxVramMs[4] = g_PsyxVramMs[5] = 0;
+                            extern double g_PsyxClearMs[2];
+                            SH_DBG("[PERF] GsDrawOt clears per-frame: gteDepthTable=%.2fms glClearDepthStencil=%.2fms (ot0+ot2 sum)",
+                                   g_PsyxClearMs[0] / s_perfFrames, g_PsyxClearMs[1] / s_perfFrames);
+                            g_PsyxClearMs[0] = g_PsyxClearMs[1] = 0;
+                            extern double g_PsyxAudioMs[4];
+                            SH_DBG("[PERF] audio render over 30s: heldMs=%.0f lockWaitMs=%.0f calls=%.0f maxHeldMs=%.1f",
+                                   g_PsyxAudioMs[0], g_PsyxAudioMs[1], g_PsyxAudioMs[2], g_PsyxAudioMs[3]);
+                            g_PsyxAudioMs[0] = g_PsyxAudioMs[1] = g_PsyxAudioMs[2] = g_PsyxAudioMs[3] = 0;
                             g_PsyxPerfMs[0] = g_PsyxPerfMs[1] = g_PsyxPerfMs[2] = g_PsyxPerfMs[3] = 0;
                         }
                         memset(s_drAcc, 0, sizeof(s_drAcc));
@@ -4031,7 +4043,16 @@ void MainLoop(void) // 0x80032EE0
         }
 #endif
         s_dr0 = SDL_GetTicks();
-        GsDrawOt(&g_OrderingTable0[g_ActiveBufferIdx]);
+        {
+            struct timespec c0, c1, w0, w1;
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c0);
+            clock_gettime(CLOCK_MONOTONIC, &w0);
+            GsDrawOt(&g_OrderingTable0[g_ActiveBufferIdx]);
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c1);
+            clock_gettime(CLOCK_MONOTONIC, &w1);
+            s_ot0Cpu  += (c1.tv_sec - c0.tv_sec) * 1000.0 + (c1.tv_nsec - c0.tv_nsec) / 1.0e6;
+            s_ot0Wall += (w1.tv_sec - w0.tv_sec) * 1000.0 + (w1.tv_nsec - w0.tv_nsec) / 1.0e6;
+        }
         s_dr1 = SDL_GetTicks();
 #ifdef SH_PC_PORT
         {

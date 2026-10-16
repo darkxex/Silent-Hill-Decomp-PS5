@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import json, os, shlex, shutil, subprocess, sys
+import json
+import os, shlex, shutil, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -92,7 +93,7 @@ def main():
     libs = list(objs) + members
     libs += [a for a in archives if not (a.name.startswith("libmap") or a.name in
              ("libchara_global.a", "libSDL2.a", "libopenal.a"))]
-    sdl = GL.parent / "sdl4k/build/native-build-audio/sdk/lib/libSDL2.a"
+    sdl = Path(os.environ.get("SH_SDL_LIB", GL.parent / "sdl4k/build/native-build-audio/sdk/lib/libSDL2.a"))
     libs += [sdl, SDK_GL / "lib/libPS5OpenGLCore33.a"]
     libs += [sdk / f"target/lib/{n}" for n in ("libunwind.a", "libc++abi.a", "libc++.a")] + [rt]
     for p in libs:

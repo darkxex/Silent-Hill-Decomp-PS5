@@ -5,6 +5,7 @@
  * These provide PC implementations of PSY-Q libgs functions using PsyCross.
  * The GS library is a higher-level graphics API built on top of libgpu.
  */
+#include <time.h>
 #include "common.h"
 #include "gpu.h"
 #include <libgpu.h>
@@ -280,6 +281,8 @@ int GsGetActiveBuff(void)
 
 static int gs_drawot_call_count = 0;
 
+double g_PsyxClearMs[2] = {0, 0};
+
 void GsDrawOt(GsOT *ot)
 {
     if (ot && ot->tag)
@@ -288,14 +291,28 @@ void GsDrawOt(GsOT *ot)
         extern int g_currentOTBucketCount;
         extern void PsyX_ClearGteDepthTable(void);
         g_currentOTBucketCount = 1 << ot->length;
-        PsyX_ClearGteDepthTable();
+        {
+            extern double g_PsyxClearMs[2];
+            struct timespec t0, t1, t2;
 
-        /* The double-precision form is desktop-only; ES 3.0 has glClearDepthf. */
-        if (g_grCaps.clearDepthDouble)
-            glClearDepth(1.0f);
-        else
-            glClearDepthf(1.0f);
-        glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            PsyX_ClearGteDepthTable();
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+
+#ifdef __PROSPERO__
+            GR_ClearDepthStencil();
+#else
+            /* The double-precision form is desktop-only; ES 3.0 has glClearDepthf. */
+            if (g_grCaps.clearDepthDouble)
+                glClearDepth(1.0f);
+            else
+                glClearDepthf(1.0f);
+            glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+#endif
+            clock_gettime(CLOCK_MONOTONIC, &t2);
+            g_PsyxClearMs[0] += (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1.0e6;
+            g_PsyxClearMs[1] += (t2.tv_sec - t1.tv_sec) * 1000.0 + (t2.tv_nsec - t1.tv_nsec) / 1.0e6;
+        }
 #endif
         DrawOTag((u_long*)ot->tag);
     }
