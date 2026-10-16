@@ -50,6 +50,7 @@ typedef struct {
     int windowHeight;
     int fullscreen;      /* 0 = windowed, 1 = exclusive fullscreen, 2 = borderless (desktop) */
     int confineCursor;   /* keep the pointer inside the window while focused, fullscreen/borderless only (config key: confine_cursor) */
+    int showFps;         /* 1 = draw a frames-per-second box in the top-right corner (config key: show_fps) */
     int disableCulling;  /* 1 = render all objects regardless of view angle */
     int drawDistancePct; /* per-poly far cap as a % of vanilla ~61u; 200 = ~122u. Worth raising with fog turned down */
     int preloadChunks;   /* 1 = load all IPD chunks at map init instead of streaming */

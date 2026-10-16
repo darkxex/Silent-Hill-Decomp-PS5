@@ -176,6 +176,11 @@ file(GLOB_RECURSE PC_PORT_SOURCES CONFIGURE_DEPENDS
 # =============================================================================
 # Executable
 # =============================================================================
+if(SH_PS5)
+    list(FILTER PC_PORT_SOURCES EXCLUDE REGEX "/fmv/(fmv_player|ReadAVI)\\.cpp$")
+    list(APPEND PC_PORT_SOURCES "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_stubs.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/openal_stub.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_unlock.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_paths.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_exit.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_main.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_elevate.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_elevate.cpp" "${CMAKE_SOURCE_DIR}/../ps5_port/src/elevation/elevation.cpp")
+    set_source_files_properties("${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_elevate.cpp" "${CMAKE_SOURCE_DIR}/../ps5_port/src/elevation/elevation.cpp" PROPERTIES COMPILE_OPTIONS "-std=c++20")
+endif()
 # Exclude map overlay stub since we now compile map0_s00 which provides g_MapOverlayHeader
 list(FILTER PC_PORT_SOURCES EXCLUDE REGEX "map_overlay_stub\\.c$")
 # PC PORT: drop the combat_target.c aiming shim; the real decompiled func_8005CD38

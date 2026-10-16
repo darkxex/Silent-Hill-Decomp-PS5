@@ -11,6 +11,8 @@
 #include "bodyprog/sound/sound_system.h"
 #ifdef SH_PC_PORT
 #include "sh_log.h"
+
+void func_8005DE0C(e_SfxId sfxId, VECTOR3* pos, s32 vol, q19_12 falloff, s8 pitch);
 #endif
 
 VECTOR3 D_800C42C0;

@@ -7,6 +7,10 @@
 #include "maps/characters/larval_stalker.h"
 #include "sh_log.h"
 
+void Ai_LarvalStalker_Init(s_SubCharacter* larvalStalker);
+void Ai_LarvalStalker_ControlUpdate(s_SubCharacter* larvalStalker);
+void sharedFunc_800D1DBC_1_s00(s_SubCharacter* larvalStalker);
+
 #define larvalStalkerProps larvalStalker->properties.larvalStalker
 
 void LarvalStalker_Update(s_SubCharacter* larvalStalker, s_AnmHeader* anmHdr, GsCOORDINATE2* coords)

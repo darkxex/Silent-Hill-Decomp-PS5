@@ -11,6 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#ifdef __PROSPERO__
+#include <sys/stat.h>
+#include <unistd.h>
+int ps5_elevate(void);
+#endif
 #include <time.h>
 
 #define SDL_MAIN_HANDLED
@@ -715,11 +720,19 @@ static int Pc_UnfilteredPrim(int tpage, int clut)
     return Font_IsTextGlyphPrim(tpage, clut) || BootScreen_IsLogoPrim(clut);
 }
 
+#ifdef __PROSPERO__
+#define main sh_game_main
+#endif
 int main(int argc, char* argv[])
 {
     /* Log file is NOT opened until after config load. SH_DBG calls before
      * that point are silently no-ops (the macro short-circuits on a NULL
      * handle). Avoids creating SilentHill.log when enable_debug_log=0. */
+#ifdef __PROSPERO__
+    ps5_elevate();
+    mkdir("/data/SilentHill", 0777);
+    mkdir("/data/SilentHill/gamedata", 0777);
+#endif
     atexit(Sh_LogAtExitFlush);
     Sh_InstallCrashFilter();
 
@@ -1040,6 +1053,7 @@ int main(int argc, char* argv[])
 
     /* Before PsyX_Initialise: the window is confined as soon as it is created. */
     g_cfg_confineCursor = g_PcConfig.confineCursor;
+    g_cfg_showFps = g_PcConfig.showFps;
 
     /* Prims that stay point-sampled under the Menus filter (PsyX_GPU.cpp). */
     g_PsyX_TextGlyphTest = Pc_UnfilteredPrim;

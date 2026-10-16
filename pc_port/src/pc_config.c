@@ -552,6 +552,10 @@ void PcConfig_Load(const char* path)
         {
             g_PcConfig.confineCursor = (atoi(value) != 0);
         }
+        else if (strcmp(key, "show_fps") == 0)
+        {
+            g_PcConfig.showFps = (atoi(value) != 0);
+        }
         else if (strcmp(key, "disable_culling") == 0)
         {
             g_PcConfig.disableCulling = (atoi(value) != 0);

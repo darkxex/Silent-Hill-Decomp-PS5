@@ -74,8 +74,14 @@ static const s8 D_80025EB0[] = {
 
 void Game_TimerUpdate(void) // 0x8004C8DC
 {
+#ifdef SH_PC_PORT
+    // The float constants below overflow an s32; clang turns that conversion into undefined behavior and compiles the whole function to a trap.
+    #define TIME_290_HOURS        ((u32)(290u * 60u * 60u * 4096u))
+    #define TIME_130_HOURS        ((u32)(130u * 60u * 60u * 4096u))
+#else
     #define TIME_290_HOURS        Q12((290.0f * 60.0f) * 60.0f)
     #define TIME_130_HOURS        Q12((130.0f * 60.0f) * 60.0f)
+#endif
     #define TIME_290_OVERFLOW_MAX 3 // `add290Hours` has max value of 3.
 
     g_SavegamePtr->gameplayTimer += g_DeltaTimeRaw;

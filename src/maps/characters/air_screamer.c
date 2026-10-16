@@ -5,6 +5,9 @@
 #include "main/rng.h"
 #include "maps/shared.h"
 #include "maps/characters/air_screamer.h"
+
+void Ai_AirScreamer_GroundWarp(s_SubCharacter* airScreamer);
+void Ai_AirScreamer_Control_0(s_SubCharacter* airScreamer);
 bool Ai_AirScreamer_Control(s_SubCharacter* airScreamer);bool Ai_AirScreamer_Init(s_SubCharacter* airScreamer);
 
 // NOTES:
