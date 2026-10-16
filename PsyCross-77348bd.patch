@@ -1,0 +1,517 @@
+From 77348bdc11000f073dce25c8abd71dee60944b62 Mon Sep 17 00:00:00 2001
+From: darkxex <darkxex@gmail.com>
+Date: Fri, 16 Oct 2026 01:11:41 -0300
+Subject: [PATCH] Add PS5 rendering and input support
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ include/PsyX/PsyX_public.h |   3 +
+ include/PsyX/PsyX_render.h |   2 +-
+ src/PsyX_main.cpp          |   1 +
+ src/pad/PsyX_pad.cpp       |  15 ++
+ src/platform.h             |   2 +-
+ src/psx/libapi.c           |   3 +
+ src/render/PsyX_render.cpp | 328 ++++++++++++++++++++++++++++++++++++-
+ 7 files changed, 351 insertions(+), 3 deletions(-)
+
+diff --git a/include/PsyX/PsyX_public.h b/include/PsyX/PsyX_public.h
+index d778e60..2365652 100644
+--- a/include/PsyX/PsyX_public.h
++++ b/include/PsyX/PsyX_public.h
+@@ -88,6 +88,9 @@ extern int							g_cfg_msaaSamples;
+  * that traps the pointer is hostile. Runtime-settable. */
+ extern int							g_cfg_confineCursor;
+ 
++/* PS5: draw a frames-per-second box in the top-right corner of the window. */
++extern int							g_cfg_showFps;
++
+ /* PC port: full-screen post-process look (0 = off, 1.. = a built-in filter).
+  * Safe to change at runtime (launcher config + F2 in-game cycle). */
+ extern int							g_cfg_postProcess;
+diff --git a/include/PsyX/PsyX_render.h b/include/PsyX/PsyX_render.h
+index 05929f3..d3750c9 100644
+--- a/include/PsyX/PsyX_render.h
++++ b/include/PsyX/PsyX_render.h
+@@ -19,7 +19,7 @@
+ #   define PSYX_IOS 1
+ #   define RENDERER_OGLES
+ #   define OGLES_VERSION (3)
+-#elif (defined(_WIN32) || defined(__APPLE__) || defined(__linux__)) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__) && !defined(__RPI__)
++#elif (defined(_WIN32) || defined(__APPLE__) || defined(__linux__) || defined(__PROSPERO__)) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__) && !defined(__RPI__)
+ #   define RENDERER_OGL
+ #   define USE_GLAD
+ #elif defined(__RPI__)
+diff --git a/src/PsyX_main.cpp b/src/PsyX_main.cpp
+index 031c91d..265651a 100644
+--- a/src/PsyX_main.cpp
++++ b/src/PsyX_main.cpp
+@@ -54,6 +54,7 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH);
+ 
+ /* PC port: mouse confinement. Default on; the launcher/config can clear it. */
+ int g_cfg_confineCursor = 1;
++int g_cfg_showFps = 0;
+ 
+ /* Keep the pointer inside the window while the game holds focus, the way
+  * borderless games normally behave. Without this a multi-monitor borderless
+diff --git a/src/pad/PsyX_pad.cpp b/src/pad/PsyX_pad.cpp
+index cca430f..2e3e42a 100644
+--- a/src/pad/PsyX_pad.cpp
++++ b/src/pad/PsyX_pad.cpp
+@@ -176,11 +176,26 @@ int PsyX_Pad_InitSystem()
+ 	// init keyboard state
+ 	g_sdlKeyboardState = SDL_GetKeyboardState(NULL);
+ 
++#ifdef __PROSPERO__
++	/* The SDL bridge is built without haptics, and asking for it in the same
++	 * call fails the whole initialisation. */
++	if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0)
++	{
++		eprinterr("Failed to initialise SDL GameController subsystem!\n");
++		return 0;
++	}
++	SDL_InitSubSystem(SDL_INIT_HAPTIC);
++	/* Button order of the PS5 joystick backend; back is the touchpad click. */
++	SDL_GameControllerAddMapping("0300d0424c050000e60c000011810000,PS5 Controller,a:b0,b:b1,x:b2,y:b3,back:b4,start:b6,"
++	                             "leftstick:b7,rightstick:b8,leftshoulder:b9,rightshoulder:b10,dpup:b11,dpdown:b12,"
++	                             "dpleft:b13,dpright:b14,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5");
++#else
+ 	if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC) < 0)
+ 	{
+ 		eprinterr("Failed to initialise SDL GameController subsystem!\n");
+ 		return 0;
+ 	}
++#endif
+ 
+ 	/* The community controller database, shipped beside the exe from
+ 	 * pc_port/assets/gamecontrollerdb.txt. SDL's built-in list covers the big
+diff --git a/src/platform.h b/src/platform.h
+index 3f16bbe..3f2ab2d 100644
+--- a/src/platform.h
++++ b/src/platform.h
+@@ -15,7 +15,7 @@
+ #   include <emscripten/emscripten.h>
+ #   include <emscripten/html5.h>
+ #   include <SDL2/SDL.h>
+-#elif defined(_WINDOWS) || defined(__MINGW32__) || defined(__linux__) || defined(__ANDROID__) || defined(__RPI__)
++#elif defined(_WINDOWS) || defined(__MINGW32__) || defined(__linux__) || defined(__PROSPERO__) || defined(__ANDROID__) || defined(__RPI__)
+ #   include <SDL.h>
+ #endif
+ 
+diff --git a/src/psx/libapi.c b/src/psx/libapi.c
+index e2b2068..412c31c 100644
+--- a/src/psx/libapi.c
++++ b/src/psx/libapi.c
+@@ -15,6 +15,9 @@ int _mkdir(const char* dirname);
+ #include <sys/stat.h>
+ #endif
+ #include "../PsyX_main.h"
++#ifdef __PROSPERO__
++#define lseek psx_lseek
++#endif
+ 
+ /* This TU is compiled with -fvisibility=hidden on ELF so its libc-colliding
+  * names (open/read/write/close/lseek/ioctl/rename) don't interpose libc for
+diff --git a/src/render/PsyX_render.cpp b/src/render/PsyX_render.cpp
+index d67eade..23c8aea 100644
+--- a/src/render/PsyX_render.cpp
++++ b/src/render/PsyX_render.cpp
+@@ -1017,9 +1017,186 @@ static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
+  * bilinear takes that crisp intermediate and eases only the leftover fraction,
+  * so it fills the window without the mush of a plain linear stretch. Nearest
+  * and bilinear stretch straight to the rect. */
++#if defined(__PROSPERO__) || defined(SH_PS5_PRESENT_DRAW)
++/* The PS5 GL driver resolves a scaling glBlitFramebuffer on the CPU (about 130 ms
++ * for the present blit); a textured triangle goes through its GPU draw path. */
++static GLuint s_ps5PresentProg = 0, s_ps5PresentVao = 0;
++static GLint  s_ps5PresentRectLoc = -1, s_ps5PresentAlphaLoc = -1;
++static int    s_ps5PresentFailed = 0;
++
++static int Ps5DrawTexture(GLuint tex, int dx, int dy, int dw, int dh, int linear, float u0, float v0, float u1, float v1, int overlay)
++{
++	GLint blendFunc[4] = { 0, 0, 0, 0 }, blendEq[2] = { 0, 0 };
++	GLint prevProg = 0, prevVao = 0, prevTex = 0, prevActive = 0, prevMin = 0, prevMag = 0, prevVp[4];
++	GLboolean prevMask[4];
++	GLboolean blend, depth, cull, stencil, scissor;
++
++	if (s_ps5PresentFailed || tex == 0 || dw <= 0 || dh <= 0)
++		return 0;
++
++	if (s_ps5PresentProg == 0)
++	{
++		static const char* vsSrc =
++			"#version 330 core\n"
++			"uniform vec4 uRect;\n"
++			"out vec2 uv;\n"
++			"void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
++			"uv = uRect.xy + p * (uRect.zw - uRect.xy); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
++		static const char* fsSrc =
++			"#version 330 core\n"
++			"in vec2 uv; out vec4 color; uniform sampler2D tex; uniform float uAlpha;\n"
++			"void main(){ vec4 t = texture(tex, uv); color = vec4(t.rgb, mix(1.0, t.a, uAlpha)); }\n";
++		GLint ok = 0;
++		GLuint vs = glad_glCreateShader(GL_VERTEX_SHADER);
++		GLuint fs = glad_glCreateShader(GL_FRAGMENT_SHADER);
++
++		glad_glShaderSource(vs, 1, &vsSrc, NULL);
++		glad_glCompileShader(vs);
++		glad_glShaderSource(fs, 1, &fsSrc, NULL);
++		glad_glCompileShader(fs);
++		s_ps5PresentProg = glad_glCreateProgram();
++		glad_glAttachShader(s_ps5PresentProg, vs);
++		glad_glAttachShader(s_ps5PresentProg, fs);
++		glad_glLinkProgram(s_ps5PresentProg);
++		glad_glGetProgramiv(s_ps5PresentProg, GL_LINK_STATUS, &ok);
++		glad_glDeleteShader(vs);
++		glad_glDeleteShader(fs);
++		if (!ok)
++		{
++			s_ps5PresentFailed = 1;
++			return 0;
++		}
++		glad_glUseProgram(s_ps5PresentProg);
++		glad_glUniform1i(glad_glGetUniformLocation(s_ps5PresentProg, "tex"), 0);
++		s_ps5PresentRectLoc = glad_glGetUniformLocation(s_ps5PresentProg, "uRect");
++		s_ps5PresentAlphaLoc = glad_glGetUniformLocation(s_ps5PresentProg, "uAlpha");
++		glad_glGenVertexArrays(1, &s_ps5PresentVao);
++		glad_glUseProgram(0);
++	}
++
++	blend = glad_glIsEnabled(GL_BLEND);
++	depth = glad_glIsEnabled(GL_DEPTH_TEST);
++	cull = glad_glIsEnabled(GL_CULL_FACE);
++	stencil = glad_glIsEnabled(GL_STENCIL_TEST);
++	scissor = glad_glIsEnabled(GL_SCISSOR_TEST);
++	glad_glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
++	glad_glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
++	glad_glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActive);
++	glad_glActiveTexture(GL_TEXTURE0);
++	glad_glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
++	glad_glGetIntegerv(GL_VIEWPORT, prevVp);
++	glad_glGetBooleanv(GL_COLOR_WRITEMASK, prevMask);
++
++	glad_glBindTexture(GL_TEXTURE_2D, tex);
++	glad_glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &prevMin);
++	glad_glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &prevMag);
++	glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, linear ? GL_LINEAR : GL_NEAREST);
++	glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, linear ? GL_LINEAR : GL_NEAREST);
++
++	if (overlay)
++	{
++		glad_glGetIntegerv(GL_BLEND_SRC_RGB, &blendFunc[0]);
++		glad_glGetIntegerv(GL_BLEND_DST_RGB, &blendFunc[1]);
++		glad_glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendFunc[2]);
++		glad_glGetIntegerv(GL_BLEND_DST_ALPHA, &blendFunc[3]);
++		glad_glGetIntegerv(GL_BLEND_EQUATION_RGB, &blendEq[0]);
++		glad_glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &blendEq[1]);
++		glad_glEnable(GL_BLEND);
++		glad_glBlendEquation(GL_FUNC_ADD);
++		glad_glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
++	}
++	else
++		glad_glDisable(GL_BLEND);
++	glad_glDisable(GL_DEPTH_TEST);
++	glad_glDisable(GL_CULL_FACE);
++	glad_glDisable(GL_STENCIL_TEST);
++	glad_glDisable(GL_SCISSOR_TEST);
++	glad_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++	glad_glViewport(dx, dy, dw, dh);
++	glad_glUseProgram(s_ps5PresentProg);
++	glad_glUniform4f(s_ps5PresentRectLoc, u0, v0, u1, v1);
++	glad_glUniform1f(s_ps5PresentAlphaLoc, overlay ? 1.0f : 0.0f);
++	glad_glBindVertexArray(s_ps5PresentVao);
++	glad_glDrawArrays(GL_TRIANGLES, 0, 3);
++
++	glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, prevMin);
++	glad_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, prevMag);
++	glad_glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
++	glad_glActiveTexture((GLenum)prevActive);
++	glad_glBindVertexArray((GLuint)prevVao);
++	glad_glUseProgram((GLuint)prevProg);
++	glad_glViewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
++	glad_glColorMask(prevMask[0], prevMask[1], prevMask[2], prevMask[3]);
++	if (overlay)
++	{
++		glad_glBlendEquationSeparate((GLenum)blendEq[0], (GLenum)blendEq[1]);
++		glad_glBlendFuncSeparate((GLenum)blendFunc[0], (GLenum)blendFunc[1], (GLenum)blendFunc[2], (GLenum)blendFunc[3]);
++	}
++	if (blend) glad_glEnable(GL_BLEND);
++	else glad_glDisable(GL_BLEND);
++	if (depth) glad_glEnable(GL_DEPTH_TEST);
++	if (cull) glad_glEnable(GL_CULL_FACE);
++	if (stencil) glad_glEnable(GL_STENCIL_TEST);
++	if (scissor) glad_glEnable(GL_SCISSOR_TEST);
++	return 1;
++}
++
++static int GR_Ps5PresentDraw(int dx, int dy, int dw, int dh, int linear)
++{
++	if (s_internalColorTex == 0)
++		return 0;
++	return Ps5DrawTexture(s_internalColorTex, dx, dy, dw, dh, linear, 0.0f, 0.0f, 1.0f, 1.0f, 0);
++}
++
++/* A colour blit that scales or flips is done as a draw, from the texture behind the
++ * read framebuffer; the driver runs those blits through a slower special path. */
++static int Ps5BlitAsDraw(int sx0, int sy0, int sx1, int sy1, int dx0, int dy0, int dx1, int dy1, unsigned mask, unsigned filter)
++{
++	GLint type = 0, name = 0, w = 0, h = 0, prevTex = 0;
++	int sw = sx1 - sx0, sh = sy1 - sy0, dw = dx1 - dx0, dh = dy1 - dy0;
++	float u0, v0, u1, v1;
++	int ndx = dx0, ndy = dy0;
++
++	if (mask != GL_COLOR_BUFFER_BIT || (sw == dw && sh == dh))
++		return 0;
++	glad_glGetFramebufferAttachmentParameteriv(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
++	if (type != GL_TEXTURE)
++		return 0;
++	glad_glGetFramebufferAttachmentParameteriv(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
++	if (name == 0)
++		return 0;
++	glad_glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
++	glad_glBindTexture(GL_TEXTURE_2D, (GLuint)name);
++	glad_glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
++	glad_glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
++	glad_glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
++	if (w <= 0 || h <= 0)
++		return 0;
++
++	u0 = (float)sx0 / (float)w; u1 = (float)sx1 / (float)w;
++	v0 = (float)sy0 / (float)h; v1 = (float)sy1 / (float)h;
++	if (dw < 0) { float t = u0; u0 = u1; u1 = t; ndx = dx1; dw = -dw; }
++	if (dh < 0) { float t = v0; v0 = v1; v1 = t; ndy = dy1; dh = -dh; }
++	return Ps5DrawTexture((GLuint)name, ndx, ndy, dw, dh, filter == GL_LINEAR, u0, v0, u1, v1, 0);
++}
++
++static void Ps5Blit(int sx0, int sy0, int sx1, int sy1, int dx0, int dy0, int dx1, int dy1, unsigned mask, unsigned filter)
++{
++	if (Ps5BlitAsDraw(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter))
++		return;
++	glad_glBlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter);
++}
++#define glBlitFramebuffer(...) Ps5Blit(__VA_ARGS__)
++#endif
++
+ static void GR_PresentBlit(GLuint src, int dx, int dy, int dw, int dh)
+ {
+ 	const int mode = g_PcPresentScale;
++#if defined(__PROSPERO__) || defined(SH_PS5_PRESENT_DRAW)
++	if (s_internalW > 0 && s_internalH > 0 && dw > 0 && dh > 0 &&
++	    GR_Ps5PresentDraw(dx, dy, dw, dh, mode != 1))
++		return;
++#endif
+ 
+ 	if (s_internalW <= 0 || s_internalH <= 0 || dw <= 0 || dh <= 0)
+ 		return;
+@@ -1319,7 +1496,11 @@ static void GR_ResolveBackend(void)
+ #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+ int GR_InitialiseGLContext(char* windowName, int fullscreen)
+ {
++#ifdef __PROSPERO__
++	int windowFlags = SDL_WINDOW_OPENGL;
++#else
+ 	int windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
++#endif
+ 
+ #if defined(RENDERER_OGL)
+ 	/* A window created with SDL_WINDOW_OPENGL gets an SDL-chosen pixel format
+@@ -1341,6 +1522,14 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
+ 		windowFlags |= SDL_WINDOW_FULLSCREEN;
+ #endif
+ 
++#ifdef __PROSPERO__
++	/* The SDL bridge only accepts one fixed 1920x1080 OpenGL window; the render
++	 * resolution stays whatever width/height ask for (g_cfgRenderWidth). */
++	windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN;
++	g_windowWidth  = 1920;
++	g_windowHeight = 1080;
++#endif
++
+ 	if(g_windowWidth <= 0 || g_windowHeight <= 0)
+ 		windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+ 
+@@ -6183,6 +6372,12 @@ static void GR_EnsureFbPackTarget(int w, int h)
+  * (GR_UpdateVRAM calls it after a full vram[] re-upload). */
+ static void GR_PackFrameToVramRectGain(int x, int y, int w, int h, float gain)
+ {
++#ifdef __PROSPERO__
++	/* Drawing into the VRAM texture corrupts it on the PS5 driver: textures uploaded
++	 * afterwards no longer show. The feedback effects fed by this pass are skipped. */
++	(void)x; (void)y; (void)w; (void)h; (void)gain;
++	return;
++#endif
+ #if USE_OPENGL
+ 	GLint vp[4];
+ 
+@@ -6783,7 +6978,7 @@ static void GR_RestoreStoredFramebufferRegion(void)
+ 	 * issue #102 crash signature (GR_UpdateVRAM -> call 0x0 on the cafe map
+ 	 * pickup). Skip the restore rather than fault; the feedback effect just
+ 	 * degrades. */
+-	if (!glBlitFramebuffer)
++	if (!glad_glBlitFramebuffer)
+ 		return;
+ 
+ 	const int x = g_PreviousFramebuffer.x;
+@@ -6880,6 +7075,11 @@ void GR_UpdateVRAM()
+ 	vram_need_update = 0;
+ 
+ #if USE_OPENGL
++#ifdef __PROSPERO__
++	/* The driver batches draws and runs them later; finish them before the texture
++	 * they sample is overwritten. */
++	glFinish();
++#endif
+ 	g_vramTexture = g_vramTexturesDouble[g_vramTextureIdx];
+ 	g_vramTextureIdx++;
+ 	g_vramTextureIdx &= 1;
+@@ -7004,6 +7204,10 @@ void GR_DiagGLError(const char* where)
+  * reuse, four presents old, which has long finished -- no stall. */
+ static void GreyFrame_Present(int w, int h)
+ {
++#ifdef __PROSPERO__
++	(void)w; (void)h;
++	return;
++#endif
+ #if USE_OPENGL
+ 	static GLuint        s_pbo[4];
+ 	static int           s_pboW[4];
+@@ -7125,8 +7329,127 @@ static void GreyFrame_Present(int w, int h)
+ 	memset(&s_gf, 0, sizeof(s_gf));
+ }
+ 
++
++#if defined(__PROSPERO__) || defined(SH_PS5_PRESENT_DRAW)
++/* Digits and the letters of "FPS" as 5x7 bitmaps, one byte per row, bit 4 = leftmost. */
++static const unsigned char s_fpsGlyph[13][7] = {
++	{ 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E }, { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E },
++	{ 0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F }, { 0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E },
++	{ 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 }, { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E },
++	{ 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E }, { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 },
++	{ 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E }, { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C },
++	{ 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 }, { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 },
++	{ 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E },
++};
++
++#define FPS_CHARS  7
++#define FPS_TEX_W  (FPS_CHARS * 6 + 3)
++#define FPS_TEX_H  11
++#define FPS_SCALE  4
++
++static void GR_Ps5FpsOverlay(void)
++{
++	static GLuint tex = 0;
++	static Uint32 lastTick = 0;
++	static int    frames = 0, fps = 0, dirty = 1;
++	const Uint32  now = SDL_GetTicks();
++
++	if (!g_cfg_showFps || g_presentWidth <= 0 || g_presentHeight <= 0)
++		return;
++
++	frames++;
++	if (lastTick == 0)
++		lastTick = now;
++	if (now - lastTick >= 500)
++	{
++		fps = (int)((float)frames * 1000.0f / (float)(now - lastTick) + 0.5f);
++		frames = 0;
++		lastTick = now;
++		dirty = 1;
++	}
++
++	if (tex == 0)
++	{
++		glad_glGenTextures(1, &tex);
++		dirty = 1;
++	}
++
++	if (dirty)
++	{
++		unsigned char pixels[FPS_TEX_W * FPS_TEX_H * 4];
++		char          text[FPS_CHARS + 1];
++		GLint         prevTex = 0, prevActive = 0;
++		int           i, x, y;
++
++		snprintf(text, sizeof(text), "%*d FPS", FPS_CHARS - 4, fps > 999 ? 999 : fps);
++		for (i = 0; i < FPS_TEX_W * FPS_TEX_H; i++)
++		{
++			pixels[i * 4 + 0] = 0;
++			pixels[i * 4 + 1] = 0;
++			pixels[i * 4 + 2] = 0;
++			pixels[i * 4 + 3] = 170;
++		}
++		for (i = 0; i < FPS_CHARS; i++)
++		{
++			const char c = text[i];
++			const int  g = (c >= '0' && c <= '9') ? c - '0' : (c == 'F') ? 10 : (c == 'P') ? 11 : (c == 'S') ? 12 : -1;
++
++			if (g < 0)
++				continue;
++			for (y = 0; y < 7; y++)
++			{
++				for (x = 0; x < 5; x++)
++				{
++					if (s_fpsGlyph[g][y] & (0x10 >> x))
++					{
++						/* Row 0 of the texture is the bottom of the box. */
++						const int px = 2 + i * 6 + x;
++						const int py = FPS_TEX_H - 1 - (2 + y);
++						unsigned char* p = &pixels[(py * FPS_TEX_W + px) * 4];
++
++						p[0] = 255; p[1] = 255; p[2] = 255; p[3] = 255;
++					}
++				}
++			}
++		}
++
++		glad_glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActive);
++		glad_glActiveTexture(GL_TEXTURE0);
++		glad_glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
++		glad_glBindTexture(GL_TEXTURE_2D, tex);
++		glad_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++		glad_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, FPS_TEX_W, FPS_TEX_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
++		glad_glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
++		glad_glActiveTexture((GLenum)prevActive);
++		dirty = 0;
++	}
++
++	Ps5DrawTexture(tex, g_presentWidth - FPS_TEX_W * FPS_SCALE - 16, g_presentHeight - FPS_TEX_H * FPS_SCALE - 16,
++	               FPS_TEX_W * FPS_SCALE, FPS_TEX_H * FPS_SCALE, 0, 0.0f, 0.0f, 1.0f, 1.0f, 1);
++
++	g_PreviousShader       = (ShaderID)-1;
++	g_lastBoundTexture     = (TextureID)-1;
++	g_PreviousBlendMode    = -999;
++	g_PreviousDepthMode    = -999;
++	g_PreviousScissorState = -999;
++}
++#endif
++
+ void GR_SwapWindow()
+ {
++#ifdef __PROSPERO__
++	{
++		extern void PsyX_Log_Flush();
++		static Uint32 s_lastFlush = 0;
++		const Uint32  now         = SDL_GetTicks();
++
++		if (now - s_lastFlush >= 4000)
++		{
++			s_lastFlush = now;
++			PsyX_Log_Flush();
++		}
++	}
++#endif
+ 	{
+ 		extern int g_PsxFrameVerts, g_PsxLastFrameVerts;
+ 		g_PsxLastFrameVerts = g_PsxFrameVerts;
+@@ -7198,6 +7521,9 @@ void GR_SwapWindow()
+ 		 * presents nothing (a black window) when an FBO is still bound at
+ 		 * flushBuffer, even though framebuffer 0 holds the finished frame. */
+ 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
++#if defined(__PROSPERO__) || defined(SH_PS5_PRESENT_DRAW)
++		GR_Ps5FpsOverlay();
++#endif
+ 		SDL_GL_SwapWindow(g_window);
+ 		if (g_internalFBO)
+ 			glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
+-- 
+2.53.0
+
