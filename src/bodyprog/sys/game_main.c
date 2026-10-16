@@ -51,6 +51,8 @@ int g_PcFmvClockDiscard = 0;
  * loop and read back only on a frame over the threshold, so this costs five
  * SDL_GetTicks calls a frame and prints nothing on a healthy run. */
 static unsigned int s_sfTop, s_sfUpdStart, s_sfUpdEnd, s_sfFsqEnd, s_sfSwapEnd;
+static unsigned int s_pfPh[6];
+static unsigned int s_dr0, s_dr1, s_dr2, s_dr3, s_drAcc[4], s_drPre;
 #include <stdio.h>
 #include <SDL_scancode.h>
 #include <SDL_mouse.h>
@@ -2996,6 +2998,19 @@ void MainLoop(void) // 0x80032EE0
                                    (int)g_GameWork.gameState, (int)g_SysWork.sysState);
                         }
                     }
+                    if (s_sfSwapEnd != 0)
+                    {
+                        s_drAcc[0] += s_dr0 - s_sfSwapEnd;
+                        s_drAcc[1] += s_dr1 - s_dr0;
+                        s_drAcc[2] += s_dr2 - s_dr1;
+                        s_drAcc[3] += s_dr3 - s_dr2;
+                        s_pfPh[0] += s_sfSwapEnd  - (unsigned int)s_perfLastMs;
+                        s_pfPh[1] += s_sfTop      - s_sfSwapEnd;
+                        s_pfPh[2] += s_sfUpdStart - s_sfTop;
+                        s_pfPh[3] += s_sfUpdEnd   - s_sfUpdStart;
+                        s_pfPh[4] += s_sfFsqEnd   - s_sfUpdEnd;
+                        s_pfPh[5] += (unsigned int)perfNowMs - s_sfFsqEnd;
+                    }
                     s_perfVbAccum += (u32)g_UncappedVBlanks;
                     /* A 30-second window, not 256 frames: at 240 fps the frame count
                      * logged every second and was the third-largest source in the log. */
@@ -3008,6 +3023,42 @@ void MainLoop(void) // 0x80032EE0
                                (unsigned long)s_perfWorstMs,
                                (double)s_perfVbAccum / s_perfFrames,
                                (unsigned long)s_perfFrames);
+                        SH_DBG("[PERF] phases avg ms: present=%.1f tail=%.1f top=%.1f update=%.1f fsq=%.1f sync=%.1f",
+                               (double)s_pfPh[0] / s_perfFrames, (double)s_pfPh[1] / s_perfFrames,
+                               (double)s_pfPh[2] / s_perfFrames, (double)s_pfPh[3] / s_perfFrames,
+                               (double)s_pfPh[4] / s_perfFrames, (double)s_pfPh[5] / s_perfFrames);
+                        SH_DBG("[PERF] tail split avg ms: preDraw=%.1f ot0=%.1f ot2=%.1f endScene=%.1f",
+                               (double)s_drAcc[0] / s_perfFrames, (double)s_drAcc[1] / s_perfFrames,
+                               (double)s_drAcc[2] / s_perfFrames, (double)s_drAcc[3] / s_perfFrames);
+                        {
+                            extern double g_PsyxPerfMs[4];
+                            SH_DBG("[PERF] gpu submit avg ms: drawAllSplits=%.1f updateVB=%.1f glDrawArrays=%.1f splits/frame=%.0f",
+                                   g_PsyxPerfMs[0] / s_perfFrames, g_PsyxPerfMs[1] / s_perfFrames,
+                                   g_PsyxPerfMs[2] / s_perfFrames, g_PsyxPerfMs[3] / s_perfFrames);
+                            extern unsigned g_PsyxSplitWhy[12];
+                            SH_DBG("[PERF] split breaks/frame: nonLegacy=%.0f blend=%.0f texFmt=%.0f texId=%.0f depthMode=%.0f primMode=%.0f clip=%.0f dfe=%.0f glyph=%.0f twOff=%.0f normal=%.0f",
+                                   (double)g_PsyxSplitWhy[0] / s_perfFrames, (double)g_PsyxSplitWhy[1] / s_perfFrames,
+                                   (double)g_PsyxSplitWhy[2] / s_perfFrames, (double)g_PsyxSplitWhy[3] / s_perfFrames,
+                                   (double)g_PsyxSplitWhy[4] / s_perfFrames, (double)g_PsyxSplitWhy[5] / s_perfFrames,
+                                   (double)g_PsyxSplitWhy[6] / s_perfFrames, (double)g_PsyxSplitWhy[7] / s_perfFrames,
+                                   (double)g_PsyxSplitWhy[8] / s_perfFrames, (double)g_PsyxSplitWhy[9] / s_perfFrames,
+                                   (double)g_PsyxSplitWhy[10] / s_perfFrames);
+                            memset(g_PsyxSplitWhy, 0, sizeof(unsigned) * 12);
+                            {
+                                extern unsigned g_PsyxBlendPair[8][8];
+                                char pb[320]; int pn = 0, bi, bj;
+                                pb[0] = 0;
+                                for (bi = 0; bi < 8; bi++)
+                                    for (bj = 0; bj < 8; bj++)
+                                        if (g_PsyxBlendPair[bi][bj] && pn < 280)
+                                            pn += snprintf(pb + pn, sizeof(pb) - pn, " %d>%d=%.0f", bi, bj, (double)g_PsyxBlendPair[bi][bj] / s_perfFrames);
+                                SH_DBG("[PERF] blend pairs/frame (0=opaque 1=avg 2=add 3=sub 4=add/4 5=const):%s", pb);
+                                memset(g_PsyxBlendPair, 0, sizeof(g_PsyxBlendPair));
+                            }
+                            g_PsyxPerfMs[0] = g_PsyxPerfMs[1] = g_PsyxPerfMs[2] = g_PsyxPerfMs[3] = 0;
+                        }
+                        memset(s_drAcc, 0, sizeof(s_drAcc));
+                        memset(s_pfPh, 0, sizeof(s_pfPh));
                         s_perfFrames = 0; s_perfAccumMs = 0; s_perfWorstMs = 0; s_perfVbAccum = 0;
                     }
                 }
@@ -3979,7 +4030,9 @@ void MainLoop(void) // 0x80032EE0
             }
         }
 #endif
+        s_dr0 = SDL_GetTicks();
         GsDrawOt(&g_OrderingTable0[g_ActiveBufferIdx]);
+        s_dr1 = SDL_GetTicks();
 #ifdef SH_PC_PORT
         {
             extern int g_PcPickupItemActive;
@@ -4139,6 +4192,7 @@ void MainLoop(void) // 0x80032EE0
             g_PsxUIOrthoPass   = 1;
             GsDrawOt(&g_OrderingTable2[g_ActiveBufferIdx]);
             g_PsxUIOrthoPass   = 0;
+            s_dr2 = SDL_GetTicks();
             g_PcHorPlusEnabled = savedHorPlus;
         }
 #else
@@ -4162,6 +4216,7 @@ void MainLoop(void) // 0x80032EE0
             g_PsxGreyTag[5] = g_PsxPresentLastFrame;
         }
         PsyX_EndScene();
+        s_dr3 = SDL_GetTicks();
         /* Demand-driven texture-pack composes (pc_port/src/texpack_lazy.c). Runs
          * HERE, after the OT submit and after the swap inside PsyX_EndScene,
          * because it creates and REPLACES GL texture objects: ApplyHiresOverride
