@@ -14,6 +14,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+extern "C" void ps5_unlock_trace_add(const char *fmt, ...);
+
 namespace
 {
 constexpr char request_path[] = "/download0/elevate_proc";
@@ -186,7 +188,10 @@ ResidentResult try_resident(pid_t pid) noexcept
     using elevation::Status;
     File result{open(result_path, O_WRONLY | O_CREAT | O_TRUNC, 0644)};
     if (result.get() < 0)
+    {
+        ps5_unlock_trace_add("lapy: resident result file errno=%d; ", errno);
         return {Status::unavailable, true};
+    }
     (void)fchmod(result.get(), 0644);
     if (seteuid(geteuid()) != 0)
         return {Status::prepare_failed, false};
@@ -280,7 +285,10 @@ elevation::Status run_helper(const char *path, const elevation::wire::Message &r
         return Status::invalid_request;
     File helper{open(path, O_RDONLY)};
     if (helper.get() < 0)
+    {
+        ps5_unlock_trace_add("lapy: helper %s open errno=%d; ", path, errno);
         return Status::unavailable;
+    }
     const int socket = sceNetSocket("lapy_owned_helper", 2, 1, 6);
     if (socket < 0)
         return Status::transport_error;
@@ -299,7 +307,9 @@ elevation::Status run_helper(const char *path, const elevation::wire::Message &r
                                  0x0100007f,
                                  0,
                                  {0}};
-    if (configured && sceNetConnect(socket, &endpoint, sizeof(endpoint)) >= 0)
+    const int connected = configured ? sceNetConnect(socket, &endpoint, sizeof(endpoint)) : -1;
+    ps5_unlock_trace_add("lapy: elfldr connect=%d configured=%d; ", connected, (int)configured);
+    if (configured && connected >= 0)
     {
         std::array<std::uint8_t, 4096> buffer{};
         bool streamed = true;
@@ -316,6 +326,7 @@ elevation::Status run_helper(const char *path, const elevation::wire::Message &r
         }
         if (streamed)
             status = exchange(socket, request);
+        ps5_unlock_trace_add("lapy: streamed=%d exchange status=%u; ", (int)streamed, (unsigned)status);
     }
     (void)sceNetSocketClose(socket);
     return status;

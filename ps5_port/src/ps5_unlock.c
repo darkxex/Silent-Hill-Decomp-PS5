@@ -47,6 +47,45 @@ static const char *const REQUESTS[] = {
 
 /* /download0 belongs to the title's download data, which the system mounts shortly after the
  * process starts; the request file can only be written once it is there. */
+/* Which ways of creating a file under /download0 does the sandbox allow? Each result is
+ * appended to the trace as name=ok or name=errno. */
+static void probe_one(const char *tag, int fd)
+{
+    if (fd >= 0)
+        ps5_unlock_trace_add("%s=ok ", tag);
+    else
+        ps5_unlock_trace_add("%s=%d ", tag, errno);
+}
+
+static void probe_download0(void)
+{
+    int   fd;
+    FILE *f;
+
+    ps5_unlock_trace_add("probe: ");
+    fd = open("/download0/sh_probe_a", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    probe_one("creat0666", fd);
+    if (fd >= 0) { close(fd); unlink("/download0/sh_probe_a"); }
+    fd = open("/download0/sh_probe_b", O_WRONLY | O_CREAT, 0644);
+    probe_one("creat0644", fd);
+    if (fd >= 0) { close(fd); unlink("/download0/sh_probe_b"); }
+    f = fopen("/download0/sh_probe_c", "w");
+    probe_one("fopen", f ? 0 : -1);
+    if (f) { fclose(f); unlink("/download0/sh_probe_c"); }
+    fd = open("/download0/ps5-opengl.log", O_WRONLY | O_APPEND);
+    probe_one("append-existing", fd);
+    if (fd >= 0) close(fd);
+    fd = open("/download0/etahen_jailbreak", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    probe_one("creat-final-name", fd);
+    if (fd >= 0) { close(fd); unlink("/download0/etahen_jailbreak"); }
+    probe_one("mkdir", mkdir("/download0/sh_probe_d", 0777));
+    rmdir("/download0/sh_probe_d");
+    fd = open("/data/SilentHill/sh_probe", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    probe_one("creat-data", fd);
+    if (fd >= 0) { close(fd); unlink("/data/SilentHill/sh_probe"); }
+    ps5_unlock_trace_add("; ");
+}
+
 static bool wait_download0(int max_ms)
 {
     struct stat st;
@@ -58,6 +97,7 @@ static bool wait_download0(int max_ms)
         {
             ps5_unlock_trace_add("/download0 present after %d ms (mode %o uid %d, euid %d); ", waited,
                                  (unsigned)st.st_mode, (int)st.st_uid, (int)geteuid());
+            probe_download0();
             return true;
         }
         sceKernelUsleep(50000);
@@ -225,7 +265,8 @@ UnlockResult ps5_unlock_etahen(void)
             const bool sent = request_over_tcp(pid);
 
             ps5_unlock_trace_add("tcp request=%d; ", (int)sent);
-            result = (sent && wait_listable(90)) ? UNLOCK_OK : UNLOCK_CANT_REQUEST;
+            /* The reply may not parse even when the grant went through; look either way. */
+            result = wait_listable(90) ? UNLOCK_OK : UNLOCK_CANT_REQUEST;
             break;
         }
         /* ~1.5 s for a service to act and /data to open up */
@@ -264,7 +305,7 @@ UnlockResult ps5_unlock_quick(void)
         const bool sent = request_over_tcp(pid);
 
         ps5_unlock_trace_add("tcp request=%d; ", (int)sent);
-        if (sent && wait_listable(60))
+        if (wait_listable(90))
             result = UNLOCK_OK;
     }
     else
