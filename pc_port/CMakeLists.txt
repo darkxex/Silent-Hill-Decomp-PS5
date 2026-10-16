@@ -177,8 +177,10 @@ file(GLOB_RECURSE PC_PORT_SOURCES CONFIGURE_DEPENDS
 # Executable
 # =============================================================================
 if(SH_PS5)
-    list(FILTER PC_PORT_SOURCES EXCLUDE REGEX "/fmv/(fmv_player|ReadAVI)\\.cpp$")
     list(APPEND PC_PORT_SOURCES "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_stubs.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/openal_stub.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_unlock.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_paths.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_exit.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_main.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_elevate.c" "${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_elevate.cpp" "${CMAKE_SOURCE_DIR}/../ps5_port/src/elevation/elevation.cpp")
+    list(FILTER PC_PORT_SOURCES EXCLUDE REGEX "/fmv/ReadAVI\\.cpp$")
+    list(APPEND PC_PORT_SOURCES "${CMAKE_SOURCE_DIR}/../ps5_port/src/fmv_shim/ReadAVI_ps5.cpp")
+    set_source_files_properties("${CMAKE_SOURCE_DIR}/src/fmv/fmv_player.cpp" PROPERTIES COMPILE_OPTIONS "-fexceptions")
     set_source_files_properties("${CMAKE_SOURCE_DIR}/../ps5_port/src/ps5_elevate.cpp" "${CMAKE_SOURCE_DIR}/../ps5_port/src/elevation/elevation.cpp" PROPERTIES COMPILE_OPTIONS "-std=c++20")
 endif()
 # Exclude map overlay stub since we now compile map0_s00 which provides g_MapOverlayHeader

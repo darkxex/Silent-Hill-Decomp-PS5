@@ -12,12 +12,17 @@
 #endif
 
 #include "fmv_player.h"
+#ifdef SH_PS5
+#include "../../../ps5_port/src/fmv_shim/ReadAVI.h"
+#else
 #include "ReadAVI.h"
+#endif
 #include "mdec.h"
 #include "str_demux.h"
 #include "sh_log.h"
 
 #include <PsyX/PsyX_public.h>
+#include <PsyX/PsyX_audio.h>
 #include <PsyX/PsyX_render.h>
 #include <PsyX/PsyX_globals.h> /* g_windowWidth/Height = the scene-target size */
 #include <PsyX/util/timer.h>
@@ -27,8 +32,13 @@
 #include <psx/libgpu.h>
 #include <psx/libetc.h>
 
+#ifdef SH_PS5
+#include "stb_image.h"
+#else
 #include <jpeglib.h>
+#endif
 #include <SDL.h>
+#include <vector>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,6 +164,26 @@ static int EnsureDecodeBuffer(size_t bytes)
     return 0;
 }
 
+#ifdef SH_PS5
+/* No libjpeg in the PS5 payload SDK; stb_image decodes the (baseline) MJPEG frames. */
+static int UnpackJPEG(unsigned char* src, unsigned src_len, int* out_w, int* out_h)
+{
+    int w = 0, h = 0, n = 0;
+    unsigned char* px = stbi_load_from_memory(src, (int)src_len, &w, &h, &n, 3);
+
+    if (!px)
+        return -1;
+    if (EnsureDecodeBuffer((size_t)w * (size_t)h * 3u) != 0) {
+        stbi_image_free(px);
+        return -1;
+    }
+    memcpy(s_decodeBuffer, px, (size_t)w * (size_t)h * 3u);
+    stbi_image_free(px);
+    *out_w = w;
+    *out_h = h;
+    return 0;
+}
+#else
 /* libjpeg's default error handler exit()s the process on a corrupt frame —
  * longjmp back out and drop the frame instead. */
 #include <setjmp.h>
@@ -213,6 +243,7 @@ static int UnpackJPEG(unsigned char* src, unsigned src_len, int* out_w, int* out
     jpeg_destroy_decompress(&cinfo);
     return 0;
 }
+#endif
 
 /* Raw GL fullscreen quad - bypasses PsyCross vertex format */
 static GLuint s_fmvVAO = 0;
@@ -722,7 +753,40 @@ typedef struct {
     int32_t           lastSamples[2][2]; /* [channel][prev0=newer, prev1=older] */
     int               sectorsDecoded;
     int               holdPaused;        /* device stays paused until the first frame is shown */
+#ifdef SH_PS5
+    std::vector<int16_t> held;           /* PCM decoded while the first frame is not on screen yet */
+#endif
 } FmvAudioState;
+
+#ifdef SH_PS5
+/* The PS5 SDL audio driver allows a single open device and the software SPU holds it, so the
+ * movie audio goes through the SPU's XA stream instead of a device of its own. */
+extern "C" void SpuSetCommonCDVolume(short left, short right);
+extern "C" void SsSetSerialAttr(char s_num, char attr, char mode);
+
+static void FmvAudioPushPs5(FmvAudioState* st, const int16_t* pcm, int count)
+{
+    const int ch = st->isStereo ? 2 : 1;
+
+    if (count <= 0)
+        return;
+    if (st->holdPaused) {
+        st->held.insert(st->held.end(), pcm, pcm + count);
+        return;
+    }
+    PsyX_AudioPushXaFrames(pcm, (uint32_t)(count / ch), (uint32_t)st->sampleRate, (uint32_t)ch);
+}
+
+static void FmvAudioReleasePs5(FmvAudioState* st)
+{
+    const int ch = st->isStereo ? 2 : 1;
+
+    if (!st->held.empty())
+        PsyX_AudioPushXaFrames(st->held.data(), (uint32_t)(st->held.size() / ch),
+                               (uint32_t)st->sampleRate, (uint32_t)ch);
+    st->held.clear();
+}
+#endif
 
 static FmvAudioState s_fmvAudio;
 
@@ -867,6 +931,20 @@ static void FmvAudio_OnSector(const uint8_t* sector, void* user)
         int     srCode     = (coding >> 2) & 3;
         int     sampleRate = (srCode == 0) ? 37800 : 18900;
 
+#ifdef SH_PS5
+        st->sampleRate = sampleRate;
+        st->isStereo   = isStereo;
+        st->isOpen     = 1;
+        st->dev        = 0;
+        st->held.clear();
+        PsyX_AudioResetXa();
+        PsyX_AudioSetXaMasterGain(1.0);
+        SpuSetCommonCDVolume(0x7F00, 0x7F00);
+        /* The SPU mixes its CD input only while the serial attribute is on. */
+        SsSetSerialAttr(0, 0, 1);
+        printf("[FMV] XA audio via SPU: %d Hz %s (coding=0x%02X)\n",
+               sampleRate, isStereo ? "stereo" : "mono", coding);
+#else
         if (!(SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO)) {
             if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
                 printf("[FMV] SDL audio init failed: %s\n", SDL_GetError());
@@ -892,15 +970,22 @@ static void FmvAudio_OnSector(const uint8_t* sector, void* user)
         SDL_PauseAudioDevice(st->dev, st->holdPaused ? 1 : 0);
         printf("[FMV] XA audio opened: %d Hz %s (coding=0x%02X)\n",
                sampleRate, isStereo ? "stereo" : "mono", coding);
+#endif
     }
 
+#ifndef SH_PS5
     if (st->dev == 0) return;
+#endif
 
     int16_t pcm[FMV_XA_SAMPLES_PER_SECTOR];
     int     n = FmvDecodeXaSector(sector, pcm);
     if (n > 0) {
         FmvApplyVolume(pcm, n * (int)sizeof(int16_t), AUDIO_S16LSB);
+#ifdef SH_PS5
+        FmvAudioPushPs5(st, pcm, n);
+#else
         SDL_QueueAudio(st->dev, pcm, (Uint32)(n * (int)sizeof(int16_t)));
+#endif
         st->sectorsDecoded++;
     }
 }
@@ -1192,8 +1277,12 @@ static int PlayFromBin(int table_idx, int max_frames)
 
         if (done_frames == 0) {
             s_fmvAudio.holdPaused = 0;
+#ifdef SH_PS5
+            FmvAudioReleasePs5(&s_fmvAudio);
+#else
             if (s_fmvAudio.dev)
                 SDL_PauseAudioDevice(s_fmvAudio.dev, 0);
+#endif
         }
 
         /* PSX STR videos target 15fps (every other NTSC frame). */
@@ -1209,6 +1298,14 @@ static int PlayFromBin(int table_idx, int max_frames)
      * 0), so the queued tail is dropped rather than left to bleed into the
      * next scene. Closing also matters on its own: SDL2 caps open devices at
      * 16, and leaving one open per movie made later movies open silent. */
+#ifdef SH_PS5
+    if (s_fmvAudio.isOpen) {
+        SsSetSerialAttr(0, 0, 0);
+        PsyX_AudioResetXa();
+        s_fmvAudio.held.clear();
+        s_fmvAudio.isOpen = 0;
+    }
+#else
     if (s_fmvAudio.dev) {
         SDL_PauseAudioDevice(s_fmvAudio.dev, 1);
         SDL_ClearQueuedAudio(s_fmvAudio.dev);
@@ -1216,6 +1313,7 @@ static int PlayFromBin(int table_idx, int max_frames)
         s_fmvAudio.dev    = 0;
         s_fmvAudio.isOpen = 0;
     }
+#endif
     for (int i = 0; i < FMV_PREROLL_FRAMES; i++)
         ::free(ring[i].rgb);
     fclose(bin);
