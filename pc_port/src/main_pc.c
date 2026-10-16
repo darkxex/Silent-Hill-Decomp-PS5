@@ -729,7 +729,6 @@ int main(int argc, char* argv[])
      * that point are silently no-ops (the macro short-circuits on a NULL
      * handle). Avoids creating SilentHill.log when enable_debug_log=0. */
 #ifdef __PROSPERO__
-    ps5_elevate();
     mkdir("/data/SilentHill", 0777);
     mkdir("/data/SilentHill/gamedata", 0777);
 #endif
@@ -741,6 +740,17 @@ int main(int argc, char* argv[])
 
     /* Load config file */
     PcConfig_Load("config.cfg");
+#ifdef __PROSPERO__
+    /* No language in the config yet: follow the console's. */
+    if (g_PcConfig.languageCode[0] == '\0')
+    {
+        extern const char* ps5_system_language_code(void);
+        const char*        code = ps5_system_language_code();
+
+        if (code)
+            snprintf(g_PcConfig.languageCode, sizeof(g_PcConfig.languageCode), "%s", code);
+    }
+#endif
     PcAudioConfig_Load("config.cfg");
     {
         extern int g_PsxAudioDisabled;
@@ -766,6 +776,15 @@ int main(int argc, char* argv[])
     if (g_PcConfig.enableDebugLog) {
         SH_DebugLogInit();
         SH_DBG("[SH] main() entered (log opened post-config)");
+#ifdef __PROSPERO__
+        {
+            extern const char* ps5_unlock_trace(void);
+            extern int g_Ps5SystemLangId;
+            SH_DBG("[PS5] unlock trace: %s", ps5_unlock_trace());
+            SH_DBG("[PS5] system language id %d -> language \"%s\"", g_Ps5SystemLangId,
+                   g_PcConfig.languageCode[0] ? g_PcConfig.languageCode : "(disc default)");
+        }
+#endif
         {
             /* Build identification — first thing to check in user logs.
              * Generated fresh each build by cmake/gen_build_info.cmake. */

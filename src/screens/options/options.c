@@ -1162,6 +1162,13 @@ void Pc_Options_ResetToDefaults(void)
 #include "pc_confirm_dialog.h"
 #include "pc_bind_panel.h"
 
+/* The PC port's extra options screen is the PS5 one on this build. */
+#ifdef SH_PS5
+#define PC_OPTIONS_LABEL "PS5_Options"
+#else
+#define PC_OPTIONS_LABEL "PC_Options"
+#endif
+
 /* Shared with the header draw: 1 while the reset dialog is up (label turns red). */
 int g_PcOptResetConfirmActive = 0;
 
@@ -1446,7 +1453,7 @@ static void Options_PcOptionsMenu_EntryStringsDraw(void)
     int            count, i;
     const s_PcOpt* tbl = PcOpt_Page(&count);
     DVECTOR        strPos  = { 100, 20 };
-    const char*    HEADING = "PC_Options";
+    const char*    HEADING = PC_OPTIONS_LABEL;
 
     Gfx_StringSetColor(StringColorId_White);
     Gfx_StringSetPosition(strPos.vx, strPos.vy);
@@ -2262,6 +2269,10 @@ void Options_MainOptionsMenu_Control(void) // 0x801E3770
 
         case MainOptionsMenuEntry_Controller:
             // Enter controller screen.
+#ifdef SH_PS5
+            /* Shown but locked on PS5: pressing it does nothing. */
+            break;
+#endif
             if (g_Controller0->clickedBtnFlags & g_GameWorkPtr->config.controllerConfig.enter)
             {
                 Sd_PlaySfx(Sfx_MenuConfirm, 0, 64);
@@ -2704,7 +2715,7 @@ void Options_MainOptionsMenu_EntryStringsDraw(void) // 0x801E42EC
         "Brightness_Level",
         "Controller_Config",
 #ifdef SH_PC_PORT
-        "PC_Options",
+        PC_OPTIONS_LABEL,
 #else
         "Screen_Position",
 #endif

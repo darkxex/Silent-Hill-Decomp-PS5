@@ -187,6 +187,7 @@ static const s_MenuTranslation s_MenuTr[] = {
     /* --- PC Options (port-added screens — translated per user request; the
      * value labels shared with retail rows reuse the entries above) --- */
     { "PC_Options",        { "PC-Optionen",        "Options_PC",          "Opciones_PC",        "Opzioni_PC"     } },
+    { "PS5_Options",       { "PS5-Optionen",       "Options_PS5",         "Opciones_PS5",       "Opzioni_PS5"    } },
     { "Resolution",        { "Aufl\xF6sung",       "R\xE9solution",       "Resoluci\xF3n",      "Risoluzione"    } },
     { "Window_Mode",       { "Fenstermodus",       "Mode_fen\xEAtre",     "Modo_ventana",       "Modo_finestra"  } },
     { "Texture_Filter",    { "Texturfilter",       "Filtre_texture",      "Filtro_textura",     "Filtro_texture" } },

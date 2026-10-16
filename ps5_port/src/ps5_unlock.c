@@ -31,9 +31,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <stdarg.h>
 #include <unistd.h>
 
 int sceKernelUsleep(unsigned microseconds);
+int sceKernelOpen(const char *path, int flags, unsigned short mode);
+int sceKernelClose(int fd);
 
 static const char *const REQUESTS[] = {
     "/download0/etahen_jailbreak",   /* etaHEN, OnionHEN, old Lapy */
@@ -42,13 +45,56 @@ static const char *const REQUESTS[] = {
 #define REQUEST_COUNT (int)(sizeof(REQUESTS) / sizeof(REQUESTS[0]))
 #define CRASH_MARKER "/download0/SilentHill_unlock_attempt"
 
+/* /download0 belongs to the title's download data, which the system mounts shortly after the
+ * process starts; the request file can only be written once it is there. */
+static bool wait_download0(int max_ms)
+{
+    struct stat st;
+    int         waited;
+
+    for (waited = 0; waited <= max_ms; waited += 50)
+    {
+        if (stat("/download0", &st) == 0)
+        {
+            ps5_unlock_trace_add("/download0 present after %d ms (mode %o uid %d, euid %d); ", waited,
+                                 (unsigned)st.st_mode, (int)st.st_uid, (int)geteuid());
+            return true;
+        }
+        sceKernelUsleep(50000);
+    }
+    ps5_unlock_trace_add("/download0 never appeared (%d ms, errno=%d); ", max_ms, errno);
+    return false;
+}
+
 bool ps5_data_listable(void)
 {
+    /* Opening the folder is not enough: the sandbox lets it open and refuses to read it. */
     DIR *d = opendir("/data");
     if (!d)
         return false;
+    struct dirent *e = readdir(d);
     closedir(d);
-    return true;
+    return e != NULL;
+}
+
+/* What the unlock tried and got, for the log: it runs before the log file exists. */
+static char s_trace[1200];
+
+void ps5_unlock_trace_add(const char *fmt, ...)
+{
+    size_t used = strlen(s_trace);
+    va_list ap;
+
+    if (used + 8 >= sizeof(s_trace))
+        return;
+    va_start(ap, fmt);
+    vsnprintf(s_trace + used, sizeof(s_trace) - used, fmt, ap);
+    va_end(ap);
+}
+
+const char *ps5_unlock_trace(void)
+{
+    return s_trace;
 }
 
 static bool publish(const char *path, int pid)
@@ -57,9 +103,17 @@ static bool publish(const char *path, int pid)
     snprintf(staged, sizeof(staged), "%s.tmp", path);
     unlink(staged);
     unlink(path);
-    int fd = open(staged, O_WRONLY | O_CREAT | O_EXCL, 0666);
+    int fd = open(staged, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
+    {
+        int err = errno;
+        int kfd = sceKernelOpen(staged, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+
+        ps5_unlock_trace_add("publish(%s) open failed errno=%d, sceKernelOpen=0x%x; ", path, err, (unsigned)kfd);
+        if (kfd >= 0)
+            sceKernelClose(kfd);
         return false;
+    }
     fchmod(fd, 0666);
     char body[32];
     int n = snprintf(body, sizeof(body), "{\"PID\":%d}\n", pid);
@@ -67,9 +121,11 @@ static bool publish(const char *path, int pid)
     close(fd);
     if (!ok || rename(staged, path) != 0)
     {
+        ps5_unlock_trace_add("publish(%s) write/rename failed errno=%d; ", path, errno);
         unlink(staged);
         return false;
     }
+    ps5_unlock_trace_add("publish(%s) ok pid=%d; ", path, pid);
     return true;
 }
 
@@ -164,7 +220,12 @@ UnlockResult ps5_unlock_etahen(void)
             published += publish(REQUESTS[i], pid);
         if (published == 0)
         {
-            result = UNLOCK_CANT_REQUEST;
+            /* The sandbox may refuse to create the request file (EACCES under /download0);
+             * LegacyJB and etaHEN also answer the same request over TCP port 9028. */
+            const bool sent = request_over_tcp(pid);
+
+            ps5_unlock_trace_add("tcp request=%d; ", (int)sent);
+            result = (sent && wait_listable(90)) ? UNLOCK_OK : UNLOCK_CANT_REQUEST;
             break;
         }
         /* ~1.5 s for a service to act and /data to open up */
@@ -183,6 +244,7 @@ UnlockResult ps5_unlock_quick(void)
 {
     if (ps5_data_listable())
         return UNLOCK_ALREADY;
+    wait_download0(4000);
     if (access(CRASH_MARKER, F_OK) == 0)
         return UNLOCK_SKIPPED_AFTER_CRASH; /* ps5_unlock_etahen clears it and skips once */
     int marker = open(CRASH_MARKER, O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -197,7 +259,15 @@ UnlockResult ps5_unlock_quick(void)
     for (int i = 0; i < REQUEST_COUNT; ++i)
         published += publish(REQUESTS[i], pid);
     UnlockResult result = UNLOCK_CANT_REQUEST;
-    if (published)
+    if (!published)
+    {
+        const bool sent = request_over_tcp(pid);
+
+        ps5_unlock_trace_add("tcp request=%d; ", (int)sent);
+        if (sent && wait_listable(60))
+            result = UNLOCK_OK;
+    }
+    else
     {
         /* ~0.3 s: a service that is there answers within a few frames */
         result = wait_listable(18) ? UNLOCK_OK : UNLOCK_NO_ANSWER;

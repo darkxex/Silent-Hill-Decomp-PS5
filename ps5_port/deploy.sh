@@ -14,6 +14,7 @@ if grep -E "error:" "$LOG" | grep -v -e prospero-lld -e "linker command failed";
     exit 1
 fi
 python3 "$HERE/make_folder.py" | tail -1
+"$HERE/upload_assets.sh" || true
 
 for attempt in 1 2 3 4 5 6; do
     if curl -s -T "$HERE/../dist/$TITLE_ID/eboot.bin" "ftp://$PS5_HOST:$FTP_PORT/data/homebrew/$TITLE_ID/eboot.bin"; then

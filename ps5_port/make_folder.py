@@ -67,7 +67,7 @@ def main():
                  ("--eh-frame-hdr \\",
                   "--eh-frame-hdr --wrap=malloc --wrap=calloc --wrap=realloc --wrap=free "
                   "--wrap=posix_memalign --wrap=malloc_usable_size "
-                  "--wrap=fopen --wrap=open --wrap=stat --wrap=lstat --wrap=access --wrap=opendir "
+                  "--wrap=fopen --wrap=open --wrap=stat --wrap=lstat --wrap=access --wrap=opendir --wrap=readdir --wrap=closedir "
                   "--wrap=mkdir --wrap=remove --wrap=unlink --wrap=rmdir --wrap=rename --wrap=getcwd --wrap=exit --wrap=_Exit \\")):
         assert t.count(a) == 1, a
         t = t.replace(a, b)
@@ -108,6 +108,9 @@ def main():
         env[k] = ""
     run("bash", script, "Folder", env=env, cwd=OUT)
     app = OUT / "dist" / TITLE_ID
+    shutil.copytree(REPO / "pc_port/assets", app / "assets")
+    listing = sorted(p.relative_to(app / "assets").as_posix() for p in (app / "assets").rglob("*") if p.is_file())
+    (app / "assets/manifest.txt").write_text("\n".join(listing) + "\n")
     helper = OUT / "lapy-helper"
     run("python3", HERE / "tools/build-lapy-helper.py", TITLE_ID, helper)
     shutil.copy2(helper / "lapy.elf", app / "lapy.elf")
@@ -119,7 +122,11 @@ def main():
         shutil.rmtree(final)
     final.parent.mkdir(exist_ok=True)
     shutil.copytree(app, final)
-    shutil.copy2(OUT / "dist" / f"{TITLE_ID}.zip", REPO / "dist" / f"{TITLE_ID}.zip")
+    # The boilerplate zips the folder before the helper and the assets are added, so the
+    # archive is rebuilt from the finished folder.
+    archive = REPO / "dist" / f"{TITLE_ID}.zip"
+    archive.unlink(missing_ok=True)
+    run("python3", "-m", "zipfile", "-c", archive.name, TITLE_ID, cwd=REPO / "dist")
     print("folder:", final)
 
 
